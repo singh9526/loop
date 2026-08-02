@@ -22,13 +22,13 @@ def answer(choice=None, picked=None, fields=None, timed_out=False):
     )
 
 
-def seed(extra=(), budget_s=BUDGET):
+def seed(extra=(), budget_s=BUDGET, interval_s=INTERVAL):
     jsonl.append(
         events.make(
             "loop_opened", ts=0.0, loop_id=1,
             question="staging deploy fails at startup",
             stop_condition="comes up clean twice in a row",
-            budget_s=budget_s, interval_s=INTERVAL,
+            budget_s=budget_s, interval_s=interval_s,
             hypotheses=["cert expiry", "env var missing", "pg conn pool"],
             parent_id=None,
         )
@@ -67,6 +67,13 @@ def test_ping_prompt_carries_title_question_and_live_hypotheses():
     assert prompt.pick_after == "y"
     assert prompt.warning is None
     assert prompt.timeout_s == 300.0
+
+
+def test_ping_question_uses_the_loops_own_interval():
+    seed(interval_s=300.0)  # 5m, not the default 20m
+    blocker = FakeBlocker([answer(choice="n")])
+    tick_module.tick(now=300.0, blocker=blocker)
+    assert "5m" in blocker.prompts[0].question
 
 
 def test_ping_title_shows_paused_count():

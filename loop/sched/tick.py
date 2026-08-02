@@ -15,13 +15,18 @@ from loop.core.models import Loop, State
 from loop.core.timefmt import format_duration, parse_duration
 from loop.store import jsonl
 
-PING_QUESTION = "hypothesis space smaller than 20m ago?"
-
 CUT_FIELDS = [TextField("new_stop_condition", "new stop condition")]
 EXTEND_FIELDS = [
     TextField("new_budget", "new budget"),
     TextField("learned", "what did you learn that made it bigger?"),
 ]
+
+
+def _ping_question(loop: Loop) -> str:
+    return (
+        "hypothesis space smaller than "
+        f"{format_duration(loop.interval_s)} ago?"
+    )
 
 
 def build_prompt(state: State, loop: Loop, due: schedule.Due) -> Prompt:
@@ -36,7 +41,7 @@ def build_prompt(state: State, loop: Loop, due: schedule.Due) -> Prompt:
         return Prompt(
             kind="ping",
             title=title,
-            question=PING_QUESTION,
+            question=_ping_question(loop),
             choices=[Choice("y", "yes"), Choice("n", "no")],
             pick_list=[h.text for h in loop.live_hypotheses()],
             pick_after="y",
