@@ -60,7 +60,9 @@ def test_resume_rebases_the_next_ping():
 
 
 def test_sleep_and_wake_fires_exactly_one_ping_then_rebases():
-    log = [opened()]
+    # 8h budget ensures p75 lands at 21600s, well after 4h sleep jump at 14400s.
+    # Tests that one ping fires after long sleep, answering it rebases interval.
+    log = [opened(budget_s=28800.0)]
     now = 4.0 * 3600.0  # machine slept for four hours while the loop was active
 
     first = due_for(log, now)

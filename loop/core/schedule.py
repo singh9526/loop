@@ -40,25 +40,9 @@ def next_due(state: State, now: float) -> Due | None:
 
     elapsed = active_elapsed(loop, now)
 
-    gap = elapsed - loop.last_ping_elapsed
-    # After a large time jump, prioritize pings before checkpoints
-    if gap >= loop.interval_s:
-        if _ping_due(loop, elapsed) and not _near_checkpoint(loop, elapsed):
-            return Due(kind="ping", loop_id=loop.id, elapsed=elapsed)
-
     checkpoint = _checkpoint_due(loop, elapsed)
     if checkpoint is not None:
-        # Suppress checkpoints that are far past their boundary and haven't completed
-        # a full ping interval, UNLESS they're in retry backoff. This preserves the
-        # "catch-up ping first" behavior while allowing retry timeouts to work.
-        boundary = checkpoint_boundary(loop, checkpoint)
-        past_boundary = elapsed - boundary
-        key = checkpoint_key(checkpoint, loop.budget_s)
-        in_backoff = key in loop.checkpoints_pending
-        if gap < loop.interval_s and past_boundary > COLLISION_WINDOW_S and not in_backoff:
-            pass  # Checkpoint is suppressed
-        else:
-            return Due(kind=checkpoint, loop_id=loop.id, elapsed=elapsed)
+        return Due(kind=checkpoint, loop_id=loop.id, elapsed=elapsed)
 
     if _ping_due(loop, elapsed) and not _near_checkpoint(loop, elapsed):
         return Due(kind="ping", loop_id=loop.id, elapsed=elapsed)
