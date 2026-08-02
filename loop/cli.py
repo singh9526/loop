@@ -86,6 +86,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("close", help="close the active loop with a postmortem", parents=[common])
     subparsers.add_parser("abandon", help="abandon the active loop", parents=[common])
 
+    subparsers.add_parser("tick", help="internal: run one scheduler tick", parents=[common])
+
     subparsers.add_parser("status", help="show the active loop", parents=[common])
     return parser
 
@@ -280,6 +282,13 @@ def cmd_ls(args, state: State, now: float) -> dict:
     }
 
 
+def cmd_tick(args, state: State, now: float) -> dict:
+    from loop.sched.tick import tick
+
+    due = tick(now=None)
+    return {"fired": None if due is None else due.kind}
+
+
 COMMANDS = {
     "open": cmd_open,
     "try": cmd_try,
@@ -290,6 +299,7 @@ COMMANDS = {
     "close": cmd_close,
     "abandon": cmd_abandon,
     "status": cmd_status,
+    "tick": cmd_tick,
 }
 
 
