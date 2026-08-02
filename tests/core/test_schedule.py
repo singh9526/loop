@@ -46,8 +46,10 @@ def test_paused_time_never_makes_a_ping_due():
 
 
 def test_resume_rebases_the_next_ping():
+    # 8h budget: p75 lands at 21600s, far beyond this test's reach, so the
+    # ping clock is the only thing under test here.
     log = [
-        opened(),
+        opened(budget_s=28800.0),
         events.make("ping_answered", ts=1200.0, loop_id=1, smaller=True,
                     eliminated=1, shown_at=1200.0),
         events.make("hypothesis_eliminated", ts=1200.0, loop_id=1, hyp_id=1),
