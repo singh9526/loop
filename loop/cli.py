@@ -9,7 +9,7 @@ import time
 
 from loop import prompts, render
 from loop.core import events
-from loop.core.models import MAX_STACK_DEPTH, WARN_STACK_DEPTH, State
+from loop.core.models import MAX_STACK_DEPTH, PAUSED, WARN_STACK_DEPTH, State
 from loop.core.timefmt import format_duration
 from loop.store import jsonl
 
@@ -75,6 +75,16 @@ def build_parser() -> argparse.ArgumentParser:
     hyp_add.add_argument("text")
     hyp_kill = hyp_sub.add_parser("kill", parents=[common])
     hyp_kill.add_argument("hyp_id", type=int)
+
+    pauser = subparsers.add_parser("pause", help="pause the active loop", parents=[common])
+    pauser.add_argument("--reason", help="what interrupted; prompted if omitted")
+
+    resumer = subparsers.add_parser("resume", help="resume a paused loop", parents=[common])
+    resumer.add_argument("loop_id", nargs="?", type=int)
+
+    subparsers.add_parser("ls", help="show the loop stack", parents=[common])
+    subparsers.add_parser("close", help="close the active loop with a postmortem", parents=[common])
+    subparsers.add_parser("abandon", help="abandon the active loop", parents=[common])
 
     subparsers.add_parser("status", help="show the active loop", parents=[common])
     return parser
@@ -170,10 +180,115 @@ def cmd_status(args, state: State, now: float) -> dict:
     return {"active_id": state.active_id, "elapsed_s": loop.elapsed(now) if loop else None}
 
 
+def cmd_pause(args, state: State, now: float) -> dict:
+    loop = require_active(state)
+    reason = args.reason or prompts.ask_text("what interrupted?")
+    event = events.make("loop_paused", ts=now, loop_id=loop.id, reason=reason)
+    emit(event)
+    say(f"  #{loop.id} paused at {format_duration(loop.elapsed(now))} active.")
+    return event
+
+
+def cmd_resume(args, state: State, now: float) -> dict:
+    target = _resume_target(args, state)
+
+    active = state.active_loop()
+    if active is not None:
+        if active.id == target.id:
+            raise LoopError(f"#{target.id} is already active.")
+        reason = prompts.ask_text("what interrupted?")
+        emit(events.make("loop_paused", ts=now, loop_id=active.id, reason=reason))
+
+    event = events.make("loop_resumed", ts=now, loop_id=target.id)
+    emit(event)
+    _say_resumed(target, now)
+    return event
+
+
+def _resume_target(args, state: State):
+    if args.loop_id is None:
+        paused = state.paused_loops()
+        if not paused:
+            raise LoopError("nothing to resume.")
+        return paused[0]
+
+    target = state.loops.get(args.loop_id)
+    if target is None:
+        raise LoopError(f"no loop #{args.loop_id}.")
+    if target.status != PAUSED:
+        raise LoopError(f"#{args.loop_id} is {target.status}, not paused.")
+    return target
+
+
+def _say_resumed(loop, now: float) -> None:
+    """The resumed-status line, shared by `resume` and the close/abandon pop."""
+    say(f"  → resumed #{loop.id} · "
+        f"{format_duration(loop.elapsed(now))} / {format_duration(loop.budget_s)} · "
+        f"next ping {format_duration(loop.interval_s)}")
+
+
+def pop_to_parent(state: State, loop, now: float) -> int | None:
+    """Resume the parent if it is still paused. Returns the resumed loop id."""
+    if loop.parent_id is None:
+        return None
+    parent = state.loops.get(loop.parent_id)
+    if parent is None or parent.status != PAUSED:
+        return None
+    emit(events.make("loop_resumed", ts=now, loop_id=parent.id))
+    return parent.id
+
+
+def cmd_close(args, state: State, now: float) -> dict:
+    loop = require_active(state)
+    event = events.make(
+        "loop_closed",
+        ts=now,
+        loop_id=loop.id,
+        what_was_it=prompts.ask_text("what was it?"),
+        giveaway=prompts.ask_text("what was the giveaway?"),
+        five_min_path=prompts.ask_text("how could I have found it in 5 minutes?"),
+    )
+    emit(event)
+    say(f"  closed #{loop.id}. {format_duration(loop.elapsed(now))}. "
+        f"{loop.eliminated} hypotheses ruled out. pattern saved.")
+    _report_pop(load_state(), loop, now)
+    return event
+
+
+def cmd_abandon(args, state: State, now: float) -> dict:
+    loop = require_active(state)
+    event = events.make("loop_abandoned", ts=now, loop_id=loop.id)
+    emit(event)
+    say(f"  abandoned #{loop.id} at {format_duration(loop.elapsed(now))} active.")
+    _report_pop(load_state(), loop, now)
+    return event
+
+
+def _report_pop(state: State, loop, now: float) -> None:
+    resumed_id = pop_to_parent(state, loop, now)
+    if resumed_id is None:
+        return
+    _say_resumed(state.loops[resumed_id], now)
+
+
+def cmd_ls(args, state: State, now: float) -> dict:
+    for line in render.stack_lines(state, now):
+        say(line)
+    return {
+        "active_id": state.active_id,
+        "paused_ids": [lp.id for lp in state.paused_loops()],
+    }
+
+
 COMMANDS = {
     "open": cmd_open,
     "try": cmd_try,
     "hyp": cmd_hyp,
+    "pause": cmd_pause,
+    "resume": cmd_resume,
+    "ls": cmd_ls,
+    "close": cmd_close,
+    "abandon": cmd_abandon,
     "status": cmd_status,
 }
 
