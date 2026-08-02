@@ -1,4 +1,4 @@
-from loop.core.models import Hypothesis, Loop, State, elapsed_from_intervals
+from loop.core.models import PAUSED, Hypothesis, Loop, State, elapsed_from_intervals, paused_for
 
 
 def test_elapsed_of_a_closed_span():
@@ -48,3 +48,49 @@ def test_loop_live_hypotheses_excludes_killed():
 
 def test_state_active_loop_is_none_when_nothing_active():
     assert State(loops={}, active_id=None).active_loop() is None
+
+
+def test_paused_for_measures_since_last_active_end():
+    loop = Loop(
+        id=1,
+        question="q",
+        stop_condition="s",
+        budget_s=2700.0,
+        interval_s=1200.0,
+        parent_id=None,
+        opened_at=0.0,
+        original_budget_s=2700.0,
+        status=PAUSED,
+        intervals=[[0.0, 100.0]],
+    )
+    assert paused_for(loop, at=250.0) == 150.0
+
+
+def test_paused_for_falls_back_to_opened_at_with_no_intervals():
+    loop = Loop(
+        id=1,
+        question="q",
+        stop_condition="s",
+        budget_s=2700.0,
+        interval_s=1200.0,
+        parent_id=None,
+        opened_at=50.0,
+        original_budget_s=2700.0,
+    )
+    assert paused_for(loop, at=80.0) == 30.0
+
+
+def test_paused_for_never_negative():
+    loop = Loop(
+        id=1,
+        question="q",
+        stop_condition="s",
+        budget_s=2700.0,
+        interval_s=1200.0,
+        parent_id=None,
+        opened_at=100.0,
+        original_budget_s=2700.0,
+        status=PAUSED,
+        intervals=[[100.0, 200.0]],
+    )
+    assert paused_for(loop, at=50.0) == 0.0

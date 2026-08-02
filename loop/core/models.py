@@ -90,3 +90,12 @@ def _last_active_end(loop: Loop) -> float:
         return loop.opened_at
     end = loop.intervals[-1][1]
     return loop.opened_at if end is None else end
+
+
+def paused_for(loop: Loop, at: float) -> float:
+    """Wall-clock seconds since this loop's last active span ended."""
+    if loop.intervals:
+        end = loop.intervals[-1][1]
+        if end is not None:
+            return max(0.0, at - end)
+    return max(0.0, at - loop.opened_at)
