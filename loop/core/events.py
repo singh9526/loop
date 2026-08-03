@@ -80,11 +80,11 @@ def next_hypothesis_id(loop: Loop) -> int:
 def fold(events: list[dict]) -> State:
     state = State(loops={}, active_id=None)
     for event in events:
-        _apply(state, event)
+        apply(state, event)
     return state
 
 
-def _apply(state: State, event: dict) -> None:
+def apply(state: State, event: dict) -> None:
     kind = event["type"]
     ts = event["ts"]
     loop_id = event["loop_id"]
@@ -184,7 +184,7 @@ def _apply(state: State, event: dict) -> None:
         if state.active_id == loop_id:
             state.active_id = None
 
-    else:  # pragma: no cover - EVENT_FIELDS and _apply are kept in step
+    else:  # pragma: no cover - EVENT_FIELDS and apply are kept in step
         raise ValueError(f"fold has no handler for {kind!r}")
 
 

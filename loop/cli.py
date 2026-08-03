@@ -89,6 +89,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("tick", help="internal: run one scheduler tick", parents=[common])
 
+    subparsers.add_parser("stats", help="the logbook", parents=[common])
+    grepper = subparsers.add_parser("grep", help="search closed loops", parents=[common])
+    grepper.add_argument("term")
+
     subparsers.add_parser("status", help="show the active loop", parents=[common])
     return parser
 
@@ -292,6 +296,51 @@ def cmd_tick(args, state: State, now: float) -> dict:
     return {"fired": None if due is None else due.kind}
 
 
+def cmd_stats(args, state: State, now: float) -> dict:
+    from loop.core import stats
+
+    report = stats.compute(jsonl.read_all(), now)
+    for line in stats.render(report):
+        say(line)
+    return report
+
+
+def cmd_grep(args, state: State, now: float) -> dict:
+    from loop.core.models import ABANDONED, CLOSED
+
+    term = args.term.lower()
+    log = jsonl.read_all()  # read once; re-reading per loop was O(loops * log)
+    matches: list[dict] = []
+
+    for loop in state.loops.values():
+        if loop.status not in (CLOSED, ABANDONED):
+            continue
+        hits = [
+            (label, text)
+            for label, text in (loop.postmortem or {}).items()
+            if term in text.lower()
+        ]
+        hits += [
+            ("action", f"{event['action']} — because {event['because']}")
+            for event in log
+            if event["type"] == "action_logged"
+            and event["loop_id"] == loop.id
+            and (term in event["action"].lower() or term in event["because"].lower())
+        ]
+        if hits:
+            matches.append({"loop_id": loop.id, "question": loop.question, "hits": hits})
+
+    if not matches:
+        say(f"  no matches for {args.term!r}.")
+        return {"matches": []}
+
+    for match in matches:
+        say(f"  #{match['loop_id']}  {match['question']}")
+        for label, text in match["hits"]:
+            say(f"      {label}: {text}")
+    return {"matches": matches}
+
+
 COMMANDS = {
     "open": cmd_open,
     "try": cmd_try,
@@ -303,6 +352,8 @@ COMMANDS = {
     "abandon": cmd_abandon,
     "status": cmd_status,
     "tick": cmd_tick,
+    "stats": cmd_stats,
+    "grep": cmd_grep,
 }
 
 

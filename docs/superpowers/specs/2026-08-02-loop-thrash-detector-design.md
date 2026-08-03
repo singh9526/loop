@@ -525,9 +525,12 @@ ping response       : N answered, M timed out
 interruptions       : median N pauses/loop | median pause Xm | max depth reached N
 ```
 
-**followed** = every ping answered with no timeouts, and closed via `loop close`.
-**abandoned** = everything else. Mechanical, no judgment call, so the number cannot
-be argued with later — which is the entire reason the logbook is worth keeping.
+**followed** = no ping timeouts and no checkpoint timeouts, however the loop
+ended. **abandoned** = at least one timeout of either kind. **resolved** = ended
+via `loop close` with a postmortem rather than `loop abandon`. Splitting the
+buckets on protocol adherence alone keeps the resolved column meaningful —
+if being closed were a precondition of *followed*, that column would read
+100% by construction.
 
 Every duration in this view is **active elapsed**. A loop that sat paused for two
 days but took 40 active minutes reports 40 minutes, because that is the number your
