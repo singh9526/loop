@@ -234,3 +234,28 @@ def test_a_timed_out_checkpoint_is_recorded_and_refires():
     assert log()[-1]["type"] == "checkpoint_unanswered"
     assert schedule.next_due(state(), now=BUDGET + 599.0) is None
     assert schedule.next_due(state(), now=BUDGET + 600.0).kind == "p100"
+
+
+class ClosesTheLoopWhileAsking(FakeBlocker):
+    """A blocker whose `ask` closes the loop the prompt was built for
+    before handing back an answer — simulating a human closing/abandoning/
+    pausing from another terminal while the overlay was still up."""
+
+    def ask(self, prompt):
+        jsonl.append(events.make(
+            "loop_closed", ts=999.0, loop_id=1,
+            what_was_it="it", giveaway="g", five_min_path="p",
+        ))
+        return super().ask(prompt)
+
+
+def test_a_stale_answer_after_the_loop_closes_is_discarded():
+    seed()
+    blocker = ClosesTheLoopWhileAsking([answer(choice="n")])
+
+    result = tick_module.tick(now=INTERVAL, blocker=blocker)
+
+    assert result is None
+    # only the loop_closed the blocker itself appended — no answer events
+    assert len(log()) == 2
+    assert log()[-1]["type"] == "loop_closed"

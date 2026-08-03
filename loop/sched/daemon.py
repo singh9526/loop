@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 
 from loop.core import events
@@ -53,7 +54,23 @@ def run(
                 return
 
             _write_heartbeat(pid, now_fn())
-            tick(now=now_fn(), blocker=blocker)
+
+            # `tick()` can block in `blocker.ask()` for minutes waiting on
+            # a human — far longer than STALE_AFTER_S. Keep the heartbeat
+            # fresh for the duration so a slow answer doesn't make
+            # `is_running()` think this daemon has died and let another
+            # `loop open`/`loop resume` spawn a second one.
+            stop_pulse = threading.Event()
+            pulse = threading.Thread(
+                target=_pulse_loop, args=(pid, stop_pulse, poll_s, now_fn), daemon=True,
+            )
+            pulse.start()
+            try:
+                tick(now=now_fn(), blocker=blocker)
+            finally:
+                stop_pulse.set()
+                pulse.join(timeout=poll_s)
+
             sleep_fn(poll_s)
 
             if not _owns_pidfile(pid):
@@ -61,6 +78,34 @@ def run(
     finally:
         if _owns_pidfile(pid):
             stop()
+
+
+def _pulse_loop(
+    pid: int, stop_event: threading.Event, poll_s: float, now_fn
+) -> None:
+    """Runs in a background thread while a tick blocks on a human answer.
+
+    Refreshes the heartbeat every `poll_s` seconds, real time — this is
+    the one place in the module where waiting on the wall clock rather
+    than an injected `sleep_fn` is correct, since it exists specifically
+    to outlast a call the main loop does not control the duration of.
+    Stops the moment `stop_event` is set, or on its own the moment the
+    pidfile is gone or no longer names this PID.
+    """
+    while not stop_event.wait(poll_s):
+        if not _pulse_once(pid, now_fn):
+            return
+
+
+def _pulse_once(pid: int, now_fn) -> bool:
+    """One heartbeat refresh, through the same `_write_heartbeat` path
+    the main loop uses. Returns False without writing if this process no
+    longer owns the pidfile — gone or claimed by someone else — so the
+    pulse never recreates a file `stop()` deleted."""
+    if not _owns_pidfile(pid):
+        return False
+    _write_heartbeat(pid, now_fn())
+    return True
 
 
 def _spawn() -> None:

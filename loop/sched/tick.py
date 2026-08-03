@@ -159,6 +159,14 @@ def tick(now: float | None = None, blocker=None) -> schedule.Due | None:
         jsonl.append(events.make("checkpoint_shown", ts=at, loop_id=loop.id, kind=due.kind))
 
     answers = (blocker or get_blocker()).ask(prompt)
+
+    # A blocking prompt can sit for minutes. If the loop it was built for
+    # was closed, abandoned, or paused from elsewhere while it was up, the
+    # answers are stale — discard them and let this tick be a quiet one,
+    # exactly like a tick that found nothing due.
+    if events.fold(jsonl.read_all()).active_id != due.loop_id:
+        return None
+
     for event in answers_to_events(loop, due, answers, time.time() if now is None else now):
         jsonl.append(event)
     return due

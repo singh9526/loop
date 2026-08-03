@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 
 import pytest
 
@@ -138,3 +140,76 @@ def test_stop_removes_the_pidfile():
     paths.pid_path().write_text(json.dumps({"pid": 1, "heartbeat": 1.0}))
     daemon.stop()
     assert not paths.pid_path().exists()
+
+
+class SlowBlocker(FakeBlocker):
+    """A blocker whose `ask` blocks until the test releases it — the seam
+    for proving the heartbeat pulse survives a long-pending human prompt."""
+
+    def __init__(self, answers, release):
+        super().__init__(answers)
+        self._release = release
+
+    def ask(self, prompt):
+        self._release.wait()
+        return super().ask(prompt)
+
+
+def _wait_for_heartbeat(deadline, after=None):
+    """Poll the pidfile through the daemon's own tolerant reader.
+
+    `_write_heartbeat` is `Path.write_text` — open-truncate-write-close,
+    not an atomic replace — so a read racing a write can transiently see
+    an empty file. `_read_pidfile` already treats that as "no record yet"
+    (same tolerance `is_running` relies on for a corrupt file); polling
+    through it, rather than parsing the raw text directly, is what makes
+    this test robust against that ordinary, expected race.
+    """
+    while time.time() < deadline:
+        record = daemon._read_pidfile()
+        if record is not None and (after is None or record["heartbeat"] > after):
+            return record["heartbeat"]
+        time.sleep(0.002)
+    raise AssertionError("heartbeat did not advance before the deadline")
+
+
+def test_run_refreshes_the_heartbeat_while_a_prompt_is_pending():
+    # elapsed just over INTERVAL, nowhere near a budget checkpoint — a ping
+    # is due the instant `run()` starts, so `ask()` blocks immediately.
+    jsonl.append(open_event(ts=time.time() - INTERVAL - 1.0))
+    release = threading.Event()
+    blocker = SlowBlocker([Answers(False, "n", None, {}, 0.0, 0.0)], release)
+
+    def sleep_and_stop(seconds):
+        jsonl.append(events.make("loop_abandoned", ts=time.time(), loop_id=1))
+
+    runner = threading.Thread(
+        target=daemon.run,
+        kwargs=dict(poll_s=0.01, blocker=blocker, sleep_fn=sleep_and_stop, now_fn=time.time),
+    )
+    runner.start()
+    try:
+        deadline = time.time() + 2.0
+        first = _wait_for_heartbeat(deadline)
+
+        # ask() is still blocked on `release` — the pulse thread, not the
+        # main loop, must be the one advancing the heartbeat from here.
+        second = _wait_for_heartbeat(deadline, after=first)
+        assert second > first
+    finally:
+        release.set()
+        runner.join(timeout=2.0)
+    assert not runner.is_alive()
+
+
+def test_pulse_once_does_not_recreate_a_pidfile_stop_removed():
+    paths.pid_path().write_text(json.dumps({"pid": 42, "heartbeat": 1.0}))
+    paths.pid_path().unlink()
+    assert daemon._pulse_once(42, lambda: 2.0) is False
+    assert not paths.pid_path().exists()
+
+
+def test_pulse_once_leaves_a_stolen_pidfile_alone():
+    paths.pid_path().write_text(json.dumps({"pid": 999_999, "heartbeat": 1.0}))
+    assert daemon._pulse_once(42, lambda: 2.0) is False
+    assert json.loads(paths.pid_path().read_text())["pid"] == 999_999
