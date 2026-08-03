@@ -163,6 +163,7 @@ def apply(state: State, event: dict) -> None:
     elif kind == "checkpoint_unanswered":
         key = checkpoint_key(event["kind"], loop.budget_s)
         loop.checkpoints_pending[key] = loop.elapsed(ts)
+        loop.checkpoints_timed_out += 1
 
     elif kind == "scope_cut":
         loop.stop_condition = event["new_stop_condition"]

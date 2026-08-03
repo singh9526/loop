@@ -1,4 +1,12 @@
-from loop.core.models import PAUSED, Hypothesis, Loop, State, elapsed_from_intervals, paused_for
+from loop.core.models import (
+    PAUSED,
+    Hypothesis,
+    Loop,
+    State,
+    elapsed_from_intervals,
+    pause_gaps,
+    paused_for,
+)
 
 
 def test_elapsed_of_a_closed_span():
@@ -94,3 +102,33 @@ def test_paused_for_never_negative():
         intervals=[[100.0, 200.0]],
     )
     assert paused_for(loop, at=50.0) == 0.0
+
+
+def test_pause_gaps_across_several_pause_resume_cycles():
+    loop = Loop(
+        id=1,
+        question="q",
+        stop_condition="s",
+        budget_s=2700.0,
+        interval_s=1200.0,
+        parent_id=None,
+        opened_at=0.0,
+        original_budget_s=2700.0,
+        intervals=[[0.0, 100.0], [200.0, 300.0], [1000.0, 1050.0], [5000.0, None]],
+    )
+    assert pause_gaps(loop) == [100.0, 700.0, 3950.0]
+
+
+def test_pause_gaps_of_a_single_open_interval_is_empty():
+    loop = Loop(
+        id=1,
+        question="q",
+        stop_condition="s",
+        budget_s=2700.0,
+        interval_s=1200.0,
+        parent_id=None,
+        opened_at=0.0,
+        original_budget_s=2700.0,
+        intervals=[[0.0, None]],
+    )
+    assert pause_gaps(loop) == []

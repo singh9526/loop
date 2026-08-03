@@ -62,6 +62,23 @@ def test_a_checkpoint_timeout_also_counts_as_abandoned_protocol():
     assert report["abandoned"]["resolved_pct"] == 0.0
 
 
+def test_a_caught_checkpoint_retry_still_counts_as_abandoned_protocol():
+    # The checkpoint times out, the 10-minute retry fires, and the user
+    # answers it — checkpoints_pending ends up empty, but the timeout
+    # happened, and the log is not allowed to un-happen it.
+    log = [
+        opened(1, 0.0),
+        events.make("checkpoint_unanswered", ts=2025.0, loop_id=1, kind="p75",
+                    shown_at=2025.0),
+        events.make("checkpoint_answered", ts=2700.0, loop_id=1, kind="p75",
+                    on_track=True, decision="continue"),
+        closed(1, 2800.0),
+    ]
+    report = stats.compute(log, now=2800.0)
+    assert report["abandoned"]["count"] == 1
+    assert report["followed"]["count"] == 0
+
+
 def test_a_loop_with_zero_pings_is_still_classified():
     report = stats.compute([opened(1, 0.0), closed(1, 300.0)], now=300.0)
     assert report["followed"]["count"] == 1

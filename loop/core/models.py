@@ -59,6 +59,7 @@ class Loop:
 
     checkpoints_answered: set[str] = field(default_factory=set)
     checkpoints_pending: dict[str, float] = field(default_factory=dict)
+    checkpoints_timed_out: int = 0
     extensions: int = 0
 
     closed_at: float | None = None
@@ -99,3 +100,21 @@ def paused_for(loop: Loop, at: float) -> float:
         if end is not None:
             return max(0.0, at - end)
     return max(0.0, at - loop.opened_at)
+
+
+def pause_gaps(loop: Loop) -> list[float]:
+    """Wall-clock seconds spent paused between each pair of active spans.
+
+    One gap per adjacent interval pair. A pair whose earlier interval is
+    still open (the loop never paused between it and the next) contributes
+    nothing — that only happens for a currently-open final interval, which
+    has no "next" to pair with anyway.
+    """
+    gaps = []
+    for index in range(len(loop.intervals) - 1):
+        end = loop.intervals[index][1]
+        if end is None:
+            continue
+        start = loop.intervals[index + 1][0]
+        gaps.append(max(0.0, start - end))
+    return gaps

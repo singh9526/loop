@@ -10,7 +10,7 @@ from statistics import median
 
 from loop.core import events as events_module
 from loop.core import thrash
-from loop.core.models import ABANDONED, CLOSED, State
+from loop.core.models import ABANDONED, CLOSED, State, pause_gaps
 from loop.core.timefmt import format_duration
 
 
@@ -52,7 +52,7 @@ def compute(log: list[dict], now: float) -> dict:
 
 
 def _followed(loop) -> bool:
-    return loop.pings_timed_out == 0 and not loop.checkpoints_pending
+    return loop.pings_timed_out == 0 and loop.checkpoints_timed_out == 0
 
 
 def _elapsed_at_close(loop) -> float:
@@ -88,11 +88,7 @@ def _interruptions(terminal: list, max_depth: int) -> dict:
         return {"median_pauses": 0.0, "median_pause_s": 0.0, "max_depth": max_depth}
 
     pause_counts = [max(0, len(lp.intervals) - 1) for lp in terminal]
-    gaps = [
-        lp.intervals[index + 1][0] - lp.intervals[index][1]
-        for lp in terminal
-        for index in range(len(lp.intervals) - 1)
-    ]
+    gaps = [gap for lp in terminal for gap in pause_gaps(lp)]
     return {
         "median_pauses": median(pause_counts),
         "median_pause_s": median(gaps) if gaps else 0.0,
