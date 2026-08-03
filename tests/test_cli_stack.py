@@ -9,6 +9,7 @@ from loop.store import jsonl
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOP_HOME", str(tmp_path))
     monkeypatch.setenv("LOOP_BLOCKER", "fake")
+    monkeypatch.setattr("loop.sched.daemon.ensure_running", lambda: None)
 
 
 def open_loop(feed, question, stack=False):

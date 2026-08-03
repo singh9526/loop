@@ -11,6 +11,7 @@ from loop import prompts, render
 from loop.core import events
 from loop.core.models import MAX_STACK_DEPTH, PAUSED, WARN_STACK_DEPTH, State
 from loop.core.timefmt import format_duration
+from loop.sched import daemon
 from loop.store import jsonl
 
 DEFAULT_BUDGET_S = 2700.0
@@ -138,6 +139,7 @@ def cmd_open(args, state: State, now: float) -> dict:
         say(f"  stack depth {depth}.")
     if depth >= WARN_STACK_DEPTH:
         say("  ⚠  you are context switching, not working.")
+    daemon.ensure_running()
     return event
 
 
@@ -204,6 +206,7 @@ def cmd_resume(args, state: State, now: float) -> dict:
     event = events.make("loop_resumed", ts=now, loop_id=target.id)
     emit(event)
     _say_resumed(target, now)
+    daemon.ensure_running()
     return event
 
 
