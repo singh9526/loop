@@ -76,3 +76,38 @@ def test_ask_duration_prompt_shows_the_default(monkeypatch):
     monkeypatch.setattr("builtins.input", fake_input)
     prompts.ask_duration("time budget?", default=2700.0)
     assert "[45m]" in seen["prompt"]
+
+
+# --- Important 5: reprompts must never land on stdout, which --json owns ---
+
+
+def test_ask_text_reprompt_goes_to_stderr(feed, capsys):
+    feed(["", "finally"])
+    prompts.ask_text("stop condition?")
+    out, err = capsys.readouterr()
+    assert "required." in err
+    assert "required." not in out
+
+
+def test_ask_yes_no_reprompt_goes_to_stderr(feed, capsys):
+    feed(["maybe", "y"])
+    prompts.ask_yes_no("stack it?")
+    out, err = capsys.readouterr()
+    assert "answer y or n." in err
+    assert "answer y or n." not in out
+
+
+def test_ask_lines_minimum_reprompt_goes_to_stderr(feed, capsys):
+    feed(["", "cert expiry", ""])
+    prompts.ask_lines("hypotheses?", minimum=1)
+    out, err = capsys.readouterr()
+    assert "at least 1 required." in err
+    assert "at least 1 required." not in out
+
+
+def test_ask_duration_parse_error_goes_to_stderr(feed, capsys):
+    feed(["not a time", "45m"])
+    prompts.ask_duration("time budget?")
+    out, err = capsys.readouterr()
+    assert "cannot parse duration" in err
+    assert "cannot parse duration" not in out

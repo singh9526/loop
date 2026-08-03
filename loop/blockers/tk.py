@@ -92,9 +92,16 @@ class _Overlay:
     def _submit_fields(self) -> None:
         values = {name: entry.get() for name, entry in self.entries.items()}
         missing = self.session.submit_fields(values)
+        # Every field is re-marked on every attempt, not just the missing
+        # ones — otherwise a field highlighted on attempt 1 stays red
+        # forever once the user fixes it on attempt 2, even though it is
+        # no longer missing.
+        for name, entry in self.entries.items():
+            if name in missing:
+                entry.configure(highlightbackground=WARN, highlightthickness=2)
+            else:
+                entry.configure(highlightthickness=0)
         if missing:
-            for name in missing:
-                self.entries[name].configure(highlightbackground=WARN, highlightthickness=2)
             return
         self._finish_if_done()
 

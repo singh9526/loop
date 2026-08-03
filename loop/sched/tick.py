@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 
-from loop.blockers.base import Answers, Choice, Prompt, TextField
+from loop.blockers.base import Answers, Blocker, Choice, Prompt, TextField
 from loop.blockers.factory import get_blocker
 from loop.core import events, schedule, thrash
 from loop.core.models import Loop, State
@@ -144,7 +144,7 @@ def _answered(loop: Loop, due: schedule.Due, now: float, *, decision: str, on_tr
     ]
 
 
-def tick(now: float | None = None, blocker=None) -> schedule.Due | None:
+def tick(now: float | None = None, blocker: Blocker | None = None) -> schedule.Due | None:
     at = time.time() if now is None else now
     state = events.fold(jsonl.read_all())
 

@@ -25,8 +25,6 @@ def compute(log: list[dict], now: float) -> dict:
         max_depth = max(max_depth, events_module.stack_depth(state))
 
         loop_id = event["loop_id"]
-        if loop_id is None:
-            continue
         loop = state.loops[loop_id]
         was_firing = firing.get(loop_id, False)
         is_firing = thrash.detect(loop, loop.elapsed(event["ts"])).firing

@@ -10,6 +10,18 @@ import os
 import sys
 
 
+class BlockerUnavailable(Exception):
+    """No blocker could be constructed on this machine."""
+
+
+NO_BLOCKER_MESSAGE = (
+    "no blocker available: this Python has no _tkinter, so loop cannot show check-ins.\n"
+    "  macOS:  brew install python-tk@3.13\n"
+    "  Debian: apt install python3-tk\n"
+    "  or set LOOP_BLOCKER=fake to record without overlays."
+)
+
+
 def _tk_blocker():
     from loop.blockers.tk import TkBlocker
 
@@ -33,9 +45,9 @@ def get_blocker():
     if override == "fake":
         return _fake_blocker()
     if override == "tk":
-        return _tk_blocker()
+        return _construct_or_raise(_tk_blocker)
     if override == "macos":
-        return _macos_blocker()
+        return _construct_or_raise(_macos_blocker)
     if override:
         raise ValueError(f"unknown LOOP_BLOCKER: {override!r}")
 
@@ -48,4 +60,11 @@ def get_blocker():
                 "install with: pip install 'loop-tool[macos]'",
                 file=sys.stderr,
             )
-    return _tk_blocker()
+    return _construct_or_raise(_tk_blocker)
+
+
+def _construct_or_raise(build):
+    try:
+        return build()
+    except ImportError as exc:
+        raise BlockerUnavailable(NO_BLOCKER_MESSAGE) from exc

@@ -15,6 +15,8 @@ import sys
 import threading
 import time
 
+from loop.blockers.base import Blocker
+from loop.blockers.factory import BlockerUnavailable
 from loop.core import events
 from loop.sched.tick import tick
 from loop.store import jsonl, paths
@@ -42,7 +44,7 @@ def stop() -> None:
 def run(
     *,
     poll_s: float = POLL_S,
-    blocker=None,
+    blocker: Blocker | None = None,
     sleep_fn=time.sleep,
     now_fn=time.time,
 ) -> None:
@@ -53,7 +55,11 @@ def run(
             if state.active_id is None:
                 return
 
-            _write_heartbeat(pid, now_fn())
+            try:
+                _write_heartbeat(pid, now_fn())
+            except OSError as exc:
+                print(f"loop daemon: heartbeat write failed: {exc}", file=sys.stderr)
+                return
 
             # `tick()` can block in `blocker.ask()` for minutes waiting on
             # a human — far longer than STALE_AFTER_S. Keep the heartbeat
@@ -67,6 +73,9 @@ def run(
             pulse.start()
             try:
                 tick(now=now_fn(), blocker=blocker)
+            except BlockerUnavailable as exc:
+                print(f"loop daemon: {exc}", file=sys.stderr)
+                return
             finally:
                 stop_pulse.set()
                 pulse.join(timeout=poll_s)

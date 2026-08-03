@@ -8,6 +8,7 @@ import sys
 import time
 
 from loop import prompts, render
+from loop.blockers.factory import BlockerUnavailable, get_blocker
 from loop.core import events
 from loop.core.models import MAX_STACK_DEPTH, PAUSED, WARN_STACK_DEPTH, State
 from loop.core.timefmt import format_duration
@@ -52,6 +53,18 @@ def require_active(state: State):
     return loop
 
 
+def require_blocker() -> None:
+    """Fail loudly, before any event is written, if nothing can show a check-in.
+
+    `loop open`/`loop resume` must never leave a timer running that the
+    daemon can never surface a prompt for.
+    """
+    try:
+        get_blocker()
+    except BlockerUnavailable as exc:
+        raise LoopError(str(exc)) from exc
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="loop", description="a thrash detector for debugging")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -90,7 +103,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("tick", help="internal: run one scheduler tick", parents=[common])
 
     subparsers.add_parser("stats", help="the logbook", parents=[common])
-    grepper = subparsers.add_parser("grep", help="search closed loops", parents=[common])
+    grepper = subparsers.add_parser(
+        "grep", help="search closed and abandoned loops", parents=[common]
+    )
     grepper.add_argument("term")
 
     subparsers.add_parser("status", help="show the active loop", parents=[common])
@@ -98,6 +113,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_open(args, state: State, now: float) -> dict:
+    require_blocker()
+
     active = state.active_loop()
     parent_id = active.id if active is not None else None
     if active is not None:
@@ -109,11 +126,10 @@ def cmd_open(args, state: State, now: float) -> dict:
         say(f"  ⚠  #{active.id} \"{active.question}\" is active")
         if not prompts.ask_yes_no("pause it and stack this on top?"):
             raise LoopError("aborted.")
-        emit(events.make("loop_paused", ts=now, loop_id=active.id, reason=args.question))
-        say(f"  #{active.id} paused at "
-            f"{format_duration(active.elapsed(now))} active.")
-        state = load_state()
 
+    # Every answer is collected before anything is written. An abort here
+    # (Ctrl-D at any remaining prompt) must leave the parent active and the
+    # log untouched — not paused with nothing running underneath it.
     stop_condition = prompts.ask_text("stop condition?")
     budget_s = (
         prompts.parse_duration(args.budget)
@@ -122,6 +138,12 @@ def cmd_open(args, state: State, now: float) -> dict:
     )
     interval_s = prompts.parse_duration(args.interval) if args.interval else DEFAULT_INTERVAL_S
     hypotheses = prompts.ask_lines("hypotheses?", minimum=1)
+
+    if active is not None:
+        emit(events.make("loop_paused", ts=now, loop_id=active.id, reason=args.question))
+        say(f"  #{active.id} paused at "
+            f"{format_duration(active.elapsed(now))} active.")
+        state = load_state()
 
     event = events.make(
         "loop_opened",
@@ -198,6 +220,8 @@ def cmd_pause(args, state: State, now: float) -> dict:
 
 
 def cmd_resume(args, state: State, now: float) -> dict:
+    require_blocker()
+
     target = _resume_target(args, state)
 
     active = state.active_loop()
@@ -365,6 +389,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = COMMANDS[args.command](args, load_state(), now)
     except (LoopError, prompts.Aborted) as exc:
+        print(f"  {exc}", file=sys.stderr)
+        return 1
+    except jsonl.CorruptLogError as exc:
+        print(
+            f"  {exc}\n"
+            "  the damaged tail is recoverable: everything before that line "
+            "is intact — trim the bad tail by hand and re-run.",
+            file=sys.stderr,
+        )
+        return 1
+    except (events.InvariantError, ValueError) as exc:
         print(f"  {exc}", file=sys.stderr)
         return 1
     if args.json:

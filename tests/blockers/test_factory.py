@@ -3,6 +3,7 @@ import json
 import pytest
 
 from loop.blockers import factory
+from loop.blockers.factory import BlockerUnavailable
 from loop.blockers.fake import FakeBlocker
 
 
@@ -56,6 +57,43 @@ def test_darwin_without_pyobjc_falls_back_to_tk(monkeypatch, capsys):
 
 def _raise_import_error():
     raise ImportError("no pyobjc")
+
+
+# --- Critical 1: fail loudly when no blocker can be constructed ---
+
+
+def test_no_blocker_available_raises_blocker_unavailable(monkeypatch):
+    monkeypatch.delenv("LOOP_BLOCKER", raising=False)
+    monkeypatch.setattr(factory.sys, "platform", "linux")
+    monkeypatch.setattr(factory, "_tk_blocker", _raise_import_error)
+    with pytest.raises(BlockerUnavailable, match="_tkinter"):
+        factory.get_blocker()
+
+
+def test_explicit_tk_override_raises_blocker_unavailable_not_import_error(monkeypatch):
+    monkeypatch.setenv("LOOP_BLOCKER", "tk")
+    monkeypatch.setattr(factory, "_tk_blocker", _raise_import_error)
+    with pytest.raises(BlockerUnavailable) as excinfo:
+        factory.get_blocker()
+    assert "brew install python-tk" in str(excinfo.value)
+    assert "LOOP_BLOCKER=fake" in str(excinfo.value)
+
+
+def test_explicit_macos_override_raises_blocker_unavailable(monkeypatch):
+    monkeypatch.setenv("LOOP_BLOCKER", "macos")
+    monkeypatch.setattr(factory, "_macos_blocker", _raise_import_error)
+    with pytest.raises(BlockerUnavailable, match="no blocker available"):
+        factory.get_blocker()
+
+
+def test_darwin_with_neither_toolkit_available_raises_blocker_unavailable(monkeypatch, capsys):
+    monkeypatch.delenv("LOOP_BLOCKER", raising=False)
+    monkeypatch.setattr(factory.sys, "platform", "darwin")
+    monkeypatch.setattr(factory, "_macos_blocker", _raise_import_error)
+    monkeypatch.setattr(factory, "_tk_blocker", _raise_import_error)
+    with pytest.raises(BlockerUnavailable):
+        factory.get_blocker()
+    assert "soft block" in capsys.readouterr().err
 
 
 def _prompt():

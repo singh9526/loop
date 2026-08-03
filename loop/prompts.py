@@ -27,7 +27,7 @@ def ask_text(label: str, *, required: bool = True) -> str:
         value = _read(label)
         if value or not required:
             return value
-        print("     required.")
+        print("     required.", file=sys.stderr)
 
 
 def ask_yes_no(label: str) -> bool:
@@ -37,7 +37,7 @@ def ask_yes_no(label: str) -> bool:
             return True
         if value in ("n", "no"):
             return False
-        print("     answer y or n.")
+        print("     answer y or n.", file=sys.stderr)
 
 
 def ask_lines(label: str, *, minimum: int = 1) -> list[str]:
@@ -50,7 +50,7 @@ def ask_lines(label: str, *, minimum: int = 1) -> list[str]:
             continue
         if len(collected) >= minimum:
             return collected
-        print(f"     at least {minimum} required.")
+        print(f"     at least {minimum} required.", file=sys.stderr)
 
 
 def ask_duration(label: str, *, default: float | None = None) -> float:
@@ -62,4 +62,4 @@ def ask_duration(label: str, *, default: float | None = None) -> float:
         try:
             return parse_duration(value)
         except ValueError as exc:
-            print(f"     {exc}")
+            print(f"     {exc}", file=sys.stderr)

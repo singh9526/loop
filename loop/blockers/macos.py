@@ -11,7 +11,6 @@ import os
 import threading
 import time
 
-import objc
 from AppKit import (
     NSApplication,
     NSApplicationActivationPolicyAccessory,
@@ -53,8 +52,7 @@ PRESENTATION_OPTIONS = (
 BG = (0.063, 0.063, 0.078, 0.97)
 FG = (0.90, 0.90, 0.90, 1.0)
 DIM = (0.54, 0.54, 0.58, 1.0)
-WARN = (1.0, 0.37, 0.34, 1.0)
-ACCENT = (0.48, 0.635, 0.968, 1.0)
+WARN = (1.0, 0.37, 0.34, 1.0)  # missing-required-field marker, set in _mark_missing_fields
 
 
 class MacOSBlocker:
@@ -75,6 +73,7 @@ class _Overlay:
         self.monitor = None
         self._main_window: NSWindow | None = None
         self._killer: threading.Timer | None = None
+        self._countdown_timer: NSTimer | None = None
         self.app = NSApplication.sharedApplication()
 
     # -- lifecycle ---------------------------------------------------------
@@ -90,7 +89,9 @@ class _Overlay:
         self.monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
             NSEventMaskKeyDown, self._on_key
         )
-        NSTimer.scheduledTimerWithTimeInterval_repeats_block_(0.2, True, self._on_countdown)
+        self._countdown_timer = NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
+            0.2, True, self._on_countdown
+        )
         # Guarantee 2: lives off the run loop entirely, on its own OS thread,
         # so it fires even if the run loop itself is wedged. A second NSTimer
         # cannot do that — it would share the same run loop as the countdown
@@ -104,16 +105,37 @@ class _Overlay:
             self.app.run()
         finally:
             # Runs on every normal dismissal path (answered, timed out) and
-            # on any exception unwinding through app.run() — a completed
-            # prompt can never be killed by a stray fire ten seconds later.
+            # on any exception unwinding through app.run(). `_finish` already
+            # tears all of this down on the ordinary path; this is the
+            # backstop for the path where `app.run()` returns without
+            # `_finish` ever firing, so a stray countdown tick can never
+            # survive into whatever overlay runs next, and the user is never
+            # left with no Dock, no menu bar, and no Cmd-Tab. Every call
+            # here is idempotent, so redoing it when `_finish` already ran
+            # is harmless — a completed prompt can never be killed by a
+            # stray fire ten seconds later.
             self._killer.cancel()
+            self._invalidate_countdown()
+            if self.monitor is not None:
+                NSEvent.removeMonitor_(self.monitor)
+                self.monitor = None
+            self.app.setPresentationOptions_(0)
 
         if self.result is None:
             self.result = self.session.timed_out(at=time.time())
         return self.result
 
+    def _invalidate_countdown(self) -> None:
+        """Safe to call any number of times, including after the timer is
+        already gone — the `None` guard, not `NSTimer.invalidate()` alone,
+        is what makes a second call from the `finally` in `run()` a no-op."""
+        if self._countdown_timer is not None:
+            self._countdown_timer.invalidate()
+            self._countdown_timer = None
+
     def _finish(self, answers: Answers) -> None:
         self.result = answers
+        self._invalidate_countdown()
         if self.monitor is not None:
             NSEvent.removeMonitor_(self.monitor)
             self.monitor = None
@@ -128,8 +150,17 @@ class _Overlay:
     # -- windows -----------------------------------------------------------
 
     def _build_windows(self) -> None:
+        screens = list(NSScreen.screens())
         main_screen = NSScreen.mainScreen()
-        for screen in NSScreen.screens():
+        if main_screen is None or main_screen not in screens:
+            # `mainScreen()` can return nil, or something not in `screens()`
+            # (a display that just went to sleep, an odd multi-monitor
+            # transition). Without a fallback, `_build_controls` never runs,
+            # `self.body` stays None, and the next `_render()` call raises
+            # an AttributeError that kills the daemon.
+            main_screen = screens[0] if screens else None
+
+        for screen in screens:
             window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_screen_(
                 screen.frame(), NSBorderlessWindowMask, NSBackingStoreBuffered, False, screen
             )
@@ -141,12 +172,17 @@ class _Overlay:
             )
             window.setOpaque_(False)
             window.setBackgroundColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(*BG))
-            window.setIgnoresMouseEvents_(True)
+
+            is_main = screen == main_screen
+            # Every display is a click-through shield except the one holding
+            # the controls — that one must accept clicks, or a user on the
+            # extend flow can never click into the text fields.
+            window.setIgnoresMouseEvents_(not is_main)
 
             content = NSView.alloc().initWithFrame_(screen.frame())
             window.setContentView_(content)
 
-            if screen == main_screen:
+            if is_main:
                 self._main_window = window
                 self._build_controls(content, screen.frame())
 
@@ -219,8 +255,15 @@ class _Overlay:
             content.addSubview_(entry)
             self.field_views[field.name] = entry
 
-        first = next(iter(self.field_views.values()))
-        self._main_window.makeFirstResponder_(first)
+        # Chain Tab through every field, wrapping the last back to the
+        # first — `EXTEND_FIELDS` has two required fields, and without this
+        # chain there is no keyboard path from the first to the second.
+        views = list(self.field_views.values())
+        for current, following in zip(views, views[1:]):
+            current.setNextKeyView_(following)
+        if views:
+            views[-1].setNextKeyView_(views[0])
+            self._main_window.makeFirstResponder_(views[0])
 
     # -- events ------------------------------------------------------------
 
@@ -239,7 +282,9 @@ class _Overlay:
                     name: str(view.stringValue())
                     for name, view in self.field_views.items()
                 }
-                if not self.session.submit_fields(values):
+                missing = self.session.submit_fields(values)
+                self._mark_missing_fields(missing)
+                if not missing:
                     self._finish(self.session.answers(answered_at=time.time()))
                 return None
             return event  # let the text field have the keystroke
@@ -249,6 +294,18 @@ class _Overlay:
             if self.session.is_complete():
                 self._finish(self.session.answers(answered_at=time.time()))
         return None  # swallow everything else
+
+    def _mark_missing_fields(self, missing: list[str]) -> None:
+        """Give a missing required field a visible marker — otherwise a user
+        who cannot find the empty field is wedged in a full-screen block
+        until the 300s timeout with no feedback at all. Every field is
+        re-marked on every attempt, not just the missing ones, so a field
+        highlighted on an earlier attempt is cleared the moment it is
+        filled in, rather than staying red for the rest of the prompt."""
+        warn = NSColor.colorWithCalibratedRed_green_blue_alpha_(*WARN)
+        default = NSColor.textBackgroundColor()
+        for name, view in self.field_views.items():
+            view.setBackgroundColor_(warn if name in missing else default)
 
 
 def _label(rect, *, size: float, colour, text: str = "") -> NSTextField:

@@ -16,7 +16,6 @@ from loop.core.models import (
     Hypothesis,
     Loop,
     State,
-    elapsed_from_intervals,
 )
 
 
@@ -159,11 +158,16 @@ def apply(state: State, event: dict) -> None:
         key = checkpoint_key(event["kind"], loop.budget_s)
         loop.checkpoints_answered.add(key)
         loop.checkpoints_pending.pop(key, None)
+        # A ping suppressed by the collision window (schedule._near_checkpoint)
+        # must not become due again the instant this checkpoint is resolved —
+        # rebase it here, exactly like a resume rebases it after a pause.
+        loop.last_ping_elapsed = loop.elapsed(ts)
 
     elif kind == "checkpoint_unanswered":
         key = checkpoint_key(event["kind"], loop.budget_s)
         loop.checkpoints_pending[key] = loop.elapsed(ts)
         loop.checkpoints_timed_out += 1
+        loop.last_ping_elapsed = loop.elapsed(ts)
 
     elif kind == "scope_cut":
         loop.stop_condition = event["new_stop_condition"]

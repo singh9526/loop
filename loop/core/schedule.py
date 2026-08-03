@@ -13,6 +13,7 @@ from loop.core.events import checkpoint_key
 from loop.core.models import Loop, State
 
 CHECKPOINT_FRACTIONS: tuple[tuple[str, float], ...] = (("p100", 1.0), ("p75", 0.75))
+CHECKPOINT_KINDS: tuple[str, ...] = tuple(kind for kind, _ in CHECKPOINT_FRACTIONS)
 CHECKPOINT_RETRY_S = 600.0
 COLLISION_WINDOW_S = 180.0
 
@@ -58,7 +59,7 @@ def _checkpoint_due(loop: Loop, elapsed: float) -> str | None:
     boundary decides the answer, whether that answer is "show it", "already
     answered", or "still inside its retry backoff".
     """
-    for kind, fraction in CHECKPOINT_FRACTIONS:
+    for kind in CHECKPOINT_KINDS:
         if elapsed < checkpoint_boundary(loop, kind):
             continue
         key = checkpoint_key(kind, loop.budget_s)
@@ -82,7 +83,7 @@ def _near_checkpoint(loop: Loop, elapsed: float) -> bool:
     returned from `_checkpoint_due`, or is inside its retry backoff — and
     during a backoff a ping is the right thing to show.
     """
-    for kind, fraction in CHECKPOINT_FRACTIONS:
+    for kind in CHECKPOINT_KINDS:
         boundary = checkpoint_boundary(loop, kind)
         if checkpoint_key(kind, loop.budget_s) in loop.checkpoints_answered:
             continue

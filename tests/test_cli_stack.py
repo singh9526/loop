@@ -94,6 +94,31 @@ def test_open_stacks_and_records_the_parent(feed, capsys):
     assert "stack depth 2" in capsys.readouterr().out
 
 
+def test_aborted_stacked_open_leaves_the_parent_active_and_nothing_new_logged(
+    feed, monkeypatch
+):
+    open_loop(feed, "staging deploy fails")
+    before = jsonl.read_all()
+
+    # "y" answers the stack confirmation; every prompt after that hits
+    # Ctrl-D (EOFError -> Aborted) before a single new event is written.
+    queue = ["y"]
+
+    def input_then_eof(_prompt=""):
+        if queue:
+            return queue.pop(0)
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", input_then_eof)
+
+    assert cli.main(["open", "prod 500s on /checkout"]) == 1
+
+    current = state()
+    assert current.active_id == 1
+    assert current.loops[1].status == "active"
+    assert jsonl.read_all() == before
+
+
 def test_open_refuses_at_max_depth(feed, capsys):
     open_loop(feed, "one")
     for question in ("two", "three", "four", "five"):

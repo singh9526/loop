@@ -5,6 +5,7 @@ import time
 import pytest
 
 from loop.blockers.base import Answers
+from loop.blockers.factory import BlockerUnavailable
 from loop.blockers.fake import FakeBlocker
 from loop.core import events
 from loop.sched import daemon
@@ -213,3 +214,38 @@ def test_pulse_once_leaves_a_stolen_pidfile_alone():
     paths.pid_path().write_text(json.dumps({"pid": 999_999, "heartbeat": 1.0}))
     assert daemon._pulse_once(42, lambda: 2.0) is False
     assert json.loads(paths.pid_path().read_text())["pid"] == 999_999
+
+
+# --- Critical 1 / Important 8: the daemon must not die mute ---
+
+
+class UnavailableBlocker:
+    """Simulates `get_blocker()` finding nothing usable at ask-time."""
+
+    def ask(self, prompt):
+        raise BlockerUnavailable("no blocker available: install tkinter")
+
+
+def test_run_exits_with_a_message_when_no_blocker_is_available(capsys):
+    # ping is due the instant `run()` starts, so `ask()` fires on the first tick
+    jsonl.append(open_event(ts=time.time() - INTERVAL - 1.0))
+
+    daemon.run(blocker=UnavailableBlocker(), sleep_fn=lambda seconds: None, now_fn=time.time)
+
+    assert "no blocker available" in capsys.readouterr().err
+    assert not paths.pid_path().exists()
+
+
+def test_run_exits_with_a_message_when_the_heartbeat_write_fails(monkeypatch, capsys):
+    jsonl.append(open_event())
+
+    def boom(pid, at):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(daemon, "_write_heartbeat", boom)
+
+    daemon.run(blocker=FakeBlocker([]), sleep_fn=lambda seconds: None, now_fn=lambda: 0.0)
+
+    err = capsys.readouterr().err
+    assert "disk full" in err
+    assert not paths.pid_path().exists()

@@ -49,6 +49,18 @@ def test_open_json_prints_the_event(feed, capsys):
     assert json.loads(capsys.readouterr().out)["type"] == "loop_opened"
 
 
+# --- Important 5: --json stdout must stay parseable through a validation retry ---
+
+
+def test_open_json_stdout_parses_cleanly_after_a_validation_retry(feed, capsys):
+    feed(["", "s", "not-a-time", "45m", "h", ""])
+    assert cli.main(["open", "q", "--json"]) == 0
+    out, err = capsys.readouterr()
+    assert json.loads(out)["type"] == "loop_opened"
+    assert "required." in err
+    assert "cannot parse duration" in err
+
+
 def test_try_requires_a_belief(feed, capsys):
     feed(["s", "45m", "h", ""])
     cli.main(["open", "q"])

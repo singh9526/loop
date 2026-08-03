@@ -198,6 +198,39 @@ def test_extension_rearms_both_checkpoints():
     assert due_for(log, now=5400.0).kind == "p100"
 
 
+def test_answering_a_checkpoint_rebases_the_suppressed_ping():
+    # ping suppressed at t=2550 (within COLLISION_WINDOW_S of the p100
+    # boundary at 2700); p100 fires and is answered at t=2700. Without a
+    # rebase, the suppressed ping would be immediately overdue and fire a
+    # second overlay ten seconds later, at t=2710.
+    log = [
+        opened(),
+        events.make("ping_answered", ts=1350.0, loop_id=1, smaller=True,
+                    eliminated=None, shown_at=1350.0),
+        events.make("checkpoint_answered", ts=2700.0, loop_id=1, kind="p100",
+                    on_track=True, decision="continue"),
+    ]
+    assert due_for(log, now=2710.0) is None
+    assert due_for(log, now=2700.0 + INTERVAL - 1.0) is None
+    assert due_for(log, now=2700.0 + INTERVAL).kind == "ping"
+
+
+def test_an_unanswered_checkpoint_also_rebases_the_suppressed_ping():
+    # Without the rebase, elapsed(3299) - 1350 = 1949s >= INTERVAL, so the
+    # ping would already be overdue here — even though the checkpoint's own
+    # ten-minute retry backoff (600s, started at 2700) has not elapsed yet.
+    log = [
+        opened(),
+        events.make("ping_answered", ts=1350.0, loop_id=1, smaller=True,
+                    eliminated=None, shown_at=1350.0),
+        events.make("checkpoint_unanswered", ts=2700.0, loop_id=1, kind="p100",
+                    shown_at=2700.0),
+    ]
+    assert due_for(log, now=2700.0 + 599.0) is None
+    # the checkpoint's own retry backoff expires and takes priority
+    assert due_for(log, now=2700.0 + 600.0).kind == "p100"
+
+
 def test_several_pause_resume_cycles_sum_towards_the_budget():
     log = [
         opened(),
