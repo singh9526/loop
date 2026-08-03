@@ -8,6 +8,7 @@ it is due.
 from __future__ import annotations
 
 import os
+import threading
 import time
 
 import objc
@@ -72,6 +73,8 @@ class _Overlay:
         self.bar: NSProgressIndicator | None = None
         self.countdown: NSTextField | None = None
         self.monitor = None
+        self._main_window: NSWindow | None = None
+        self._killer: threading.Timer | None = None
         self.app = NSApplication.sharedApplication()
 
     # -- lifecycle ---------------------------------------------------------
@@ -88,13 +91,22 @@ class _Overlay:
             NSEventMaskKeyDown, self._on_key
         )
         NSTimer.scheduledTimerWithTimeInterval_repeats_block_(0.2, True, self._on_countdown)
-        # Guarantee 2: shares no state with the countdown, so it fires even if
-        # the countdown handler is wedged. Never fold this into _on_countdown.
-        NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
-            KILL_AFTER_S, False, lambda _timer: os._exit(1)
-        )
+        # Guarantee 2: lives off the run loop entirely, on its own OS thread,
+        # so it fires even if the run loop itself is wedged. A second NSTimer
+        # cannot do that — it would share the same run loop as the countdown
+        # timer and be blocked by whatever blocked it. Never fold this into
+        # _on_countdown, and never reschedule it on the run loop.
+        self._killer = threading.Timer(KILL_AFTER_S, lambda: os._exit(1))
+        self._killer.daemon = True
+        self._killer.start()
 
-        self.app.run()
+        try:
+            self.app.run()
+        finally:
+            # Runs on every normal dismissal path (answered, timed out) and
+            # on any exception unwinding through app.run() — a completed
+            # prompt can never be killed by a stray fire ten seconds later.
+            self._killer.cancel()
 
         if self.result is None:
             self.result = self.session.timed_out(at=time.time())
@@ -135,6 +147,7 @@ class _Overlay:
             window.setContentView_(content)
 
             if screen == main_screen:
+                self._main_window = window
                 self._build_controls(content, screen.frame())
 
             window.makeKeyAndOrderFront_(None)
@@ -190,7 +203,7 @@ class _Overlay:
     def _show_fields(self) -> None:
         if self.field_views:
             return
-        content = self.windows[0].contentView()
+        content = self._main_window.contentView()
         frame = content.frame()
         width = frame.size.width * 0.7
         left = (frame.size.width - width) / 2
@@ -207,7 +220,7 @@ class _Overlay:
             self.field_views[field.name] = entry
 
         first = next(iter(self.field_views.values()))
-        self.windows[0].makeFirstResponder_(first)
+        self._main_window.makeFirstResponder_(first)
 
     # -- events ------------------------------------------------------------
 

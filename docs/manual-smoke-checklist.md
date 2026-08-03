@@ -49,10 +49,18 @@ python -m loop.cli open "smoke test" --budget 4m --interval 1m
 - [ ] `c` reveals one text field; submitting writes `checkpoint_answered` **then**
       `scope_cut`, in that order.
 - [ ] `e` reveals two text fields; the overlay refuses to submit while `learned`
-      is blank, and the field is highlighted.
+      is blank. On the tk overlay the blank field is highlighted; the macOS
+      overlay refuses silently, with no highlight — that is a known
+      difference between the two, not a bug to chase here.
 - [ ] After extending to 8m, both p75 and p100 fire again against the new budget.
 - [ ] Typing a nonsense budget such as `soon` logs `checkpoint_unanswered`,
       and the checkpoint returns ten minutes later.
+- [ ] **Multi-monitor:** with an external display attached, put focus on the
+      *non-primary* screen (e.g. click into a window there) just before a
+      checkpoint fires. The title/body text, the `c`/`e` text-entry fields,
+      and the keyboard focus must all land on that same screen — not split
+      across displays. This exercises the overlay tracking one specific
+      window rather than assuming the first display in screen order.
 
 ## The 100% checkpoint
 
@@ -64,7 +72,12 @@ python -m loop.cli open "smoke test" --budget 4m --interval 1m
 - [ ] With the overlay up, `pkill -f loop.sched.daemon` from another machine
       over SSH clears the screen and restores the menu bar and Dock.
 - [ ] Add `time.sleep(600)` to the top of `_on_countdown`, rebuild, and confirm
-      the independent kill timer terminates the process at 5:10. **Remove the
+      the kill timer still terminates the process at 5:10 — even though the
+      Cocoa run loop itself is completely frozen for the full 600 seconds.
+      This is what the kill timer being a `threading.Timer` on its own OS
+      thread (not a second `NSTimer` sharing the run loop) actually buys:
+      a same-run-loop timer could not survive this test, since the sleep
+      blocks the one thread both timers would otherwise share. **Remove the
       sleep afterwards.**
 
 ## Cleanup
