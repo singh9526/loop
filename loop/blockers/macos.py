@@ -14,6 +14,7 @@ import time
 from AppKit import (
     NSApplication,
     NSApplicationActivationPolicyAccessory,
+    NSApplicationActivationPolicyProhibited,
     NSApplicationPresentationDisableForceQuit,
     NSApplicationPresentationDisableProcessSwitching,
     NSApplicationPresentationDisableSessionTermination,
@@ -27,6 +28,7 @@ from AppKit import (
     NSFont,
     NSProgressIndicator,
     NSProgressIndicatorBarStyle,
+    NSRunLoop,
     NSScreen,
     NSTextField,
     NSTimer,
@@ -36,6 +38,7 @@ from AppKit import (
     NSWindowCollectionBehaviorFullScreenAuxiliary,
     NSWindowCollectionBehaviorStationary,
 )
+from Foundation import NSDate
 from Quartz import CGShieldingWindowLevel
 
 from loop.blockers.base import KILL_AFTER_S, Answers, Prompt, format_countdown
@@ -49,10 +52,30 @@ PRESENTATION_OPTIONS = (
     | NSApplicationPresentationDisableSessionTermination
 )
 
+DRAIN_S = 0.25
+
 BG = (0.063, 0.063, 0.078, 0.97)
 FG = (0.90, 0.90, 0.90, 1.0)
 DIM = (0.54, 0.54, 0.58, 1.0)
 WARN = (1.0, 0.37, 0.34, 1.0)  # missing-required-field marker, set in _mark_missing_fields
+
+
+class _ShieldWindow(NSWindow):
+    """A borderless window that will accept keyboard focus.
+
+    AppKit refuses key status to `NSBorderlessWindowMask` windows by
+    default, and only the key window routes keystrokes to a first
+    responder. Without these overrides the `cut scope` and `extend
+    estimate` text fields draw, take `makeFirstResponder_`, and then
+    silently swallow every keystroke — a full-screen block with no way to
+    answer it and no way out but the 300s timeout.
+    """
+
+    def canBecomeKeyWindow(self) -> bool:
+        return True
+
+    def canBecomeMainWindow(self) -> bool:
+        return True
 
 
 class MacOSBlocker:
@@ -104,22 +127,13 @@ class _Overlay:
         try:
             self.app.run()
         finally:
-            # Runs on every normal dismissal path (answered, timed out) and
-            # on any exception unwinding through app.run(). `_finish` already
-            # tears all of this down on the ordinary path; this is the
-            # backstop for the path where `app.run()` returns without
-            # `_finish` ever firing, so a stray countdown tick can never
-            # survive into whatever overlay runs next, and the user is never
-            # left with no Dock, no menu bar, and no Cmd-Tab. Every call
-            # here is idempotent, so redoing it when `_finish` already ran
-            # is harmless — a completed prompt can never be killed by a
-            # stray fire ten seconds later.
+            # Runs on every dismissal path (answered, timed out) and on any
+            # exception unwinding through app.run(). All UI teardown lives
+            # here and nowhere else: this is the one point where `app.run()`
+            # is guaranteed to have returned, which is what makes it both
+            # safe to drain the run loop and the last moment anything can.
             self._killer.cancel()
-            self._invalidate_countdown()
-            if self.monitor is not None:
-                NSEvent.removeMonitor_(self.monitor)
-                self.monitor = None
-            self.app.setPresentationOptions_(0)
+            self._release_ui()
 
         if self.result is None:
             self.result = self.session.timed_out(at=time.time())
@@ -133,8 +147,23 @@ class _Overlay:
             self._countdown_timer.invalidate()
             self._countdown_timer = None
 
-    def _finish(self, answers: Answers) -> None:
-        self.result = answers
+    def _release_ui(self) -> None:
+        """Give the screen, the keyboard, and the Dock back.
+
+        Between prompts the daemon sleeps in plain Python — nothing pumps
+        this NSApplication's run loop, for `POLL_S` at a time and for the
+        whole gap between check-ins. Anything left activated here is
+        therefore a front-most application that answers no events, which is
+        precisely what a spinning beachball and an apparently frozen Mac
+        are. Deactivating and dropping back to `Prohibited` leaves the
+        process registered as no kind of application at all, so being
+        un-pumped is harmless; `run()` re-registers it as `Accessory` for
+        the next prompt.
+
+        Every step is idempotent, and the ordering is load-bearing: hand the
+        windows back before dropping the activation policy, and drain before
+        clearing the Python references the drained events might touch.
+        """
         self._invalidate_countdown()
         if self.monitor is not None:
             NSEvent.removeMonitor_(self.monitor)
@@ -142,10 +171,30 @@ class _Overlay:
         self.app.setPresentationOptions_(0)
         for window in self.windows:
             window.orderOut_(None)
+            window.close()
         self.windows.clear()
+        self.app.deactivate()
+        _drain_run_loop()
+        self.app.setActivationPolicy_(NSApplicationActivationPolicyProhibited)
+        self.field_views.clear()
+        self.body = None
+        self.bar = None
+        self.countdown = None
+        self._main_window = None
+
+    def _finish(self, answers: Answers) -> None:
+        """Called from inside the event monitor, so from inside `app.run()`.
+
+        It only records the answer and asks the run loop to end — tearing
+        the UI down from here would mean doing it re-entrantly. `run()`'s
+        `finally` owns that, and is reached within microseconds.
+        """
+        self.result = answers
+        self._invalidate_countdown()
         self.app.stop_(None)
         # stop_ only takes effect after the next event, so post one.
-        NSApplication.sharedApplication().postEvent_atStart_(_wake_event(), True)
+        # `self.app` is `sharedApplication()` — there is only ever one.
+        self.app.postEvent_atStart_(_wake_event(), True)
 
     # -- windows -----------------------------------------------------------
 
@@ -161,7 +210,7 @@ class _Overlay:
             main_screen = screens[0] if screens else None
 
         for screen in screens:
-            window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_screen_(
+            window = _ShieldWindow.alloc().initWithContentRect_styleMask_backing_defer_screen_(
                 screen.frame(), NSBorderlessWindowMask, NSBackingStoreBuffered, False, screen
             )
             window.setLevel_(CGShieldingWindowLevel())
@@ -170,6 +219,10 @@ class _Overlay:
                 | NSWindowCollectionBehaviorStationary
                 | NSWindowCollectionBehaviorFullScreenAuxiliary
             )
+            # `_release_ui` calls `close()` to actually dispose of the
+            # window rather than only hiding it. The default would then
+            # release an object PyObjC still holds a reference to.
+            window.setReleasedWhenClosed_(False)
             window.setOpaque_(False)
             window.setBackgroundColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(*BG))
 
@@ -186,8 +239,21 @@ class _Overlay:
                 self._main_window = window
                 self._build_controls(content, screen.frame())
 
-            window.makeKeyAndOrderFront_(None)
+            # Only the window holding the controls may take key status.
+            # Every shield can now accept it, so ordering them all in with
+            # `makeKeyAndOrderFront_` would hand the keyboard to whichever
+            # display happens to come last out of `screens()` — on a
+            # multi-monitor desk, usually not the one with the text fields.
+            if is_main:
+                window.makeKeyAndOrderFront_(None)
+            else:
+                window.orderFront_(None)
             self.windows.append(window)
+
+        # `screens()` does not promise the main screen comes last, and
+        # ordering a shield in front can still displace key status.
+        if self._main_window is not None:
+            self._main_window.makeKeyAndOrderFront_(None)
 
     def _build_controls(self, content: NSView, frame) -> None:
         width = frame.size.width * 0.7
@@ -252,6 +318,7 @@ class _Overlay:
             entry.setFont_(NSFont.monospacedSystemFontOfSize_weight_(18, 0))
             entry.setBezeled_(True)
             entry.setEditable_(True)
+            entry.setSelectable_(True)
             content.addSubview_(entry)
             self.field_views[field.name] = entry
 
@@ -263,6 +330,12 @@ class _Overlay:
             current.setNextKeyView_(following)
         if views:
             views[-1].setNextKeyView_(views[0])
+            # `makeFirstResponder_` only routes keystrokes if this window is
+            # the key window. The fields are created a keystroke after the
+            # windows were built, by which time anything could have taken
+            # key — so claim it here rather than trusting `_build_windows`.
+            self.app.activateIgnoringOtherApps_(True)
+            self._main_window.makeKeyAndOrderFront_(None)
             self._main_window.makeFirstResponder_(views[0])
 
     # -- events ------------------------------------------------------------
@@ -318,6 +391,19 @@ def _label(rect, *, size: float, colour, text: str = "") -> NSTextField:
     view.setFont_(NSFont.monospacedSystemFontOfSize_weight_(size, 0))
     view.setTextColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(*colour))
     return view
+
+
+def _drain_run_loop(seconds: float = DRAIN_S) -> None:
+    """Pump queued events so the teardown reaches the window server.
+
+    `app.run()` has already returned by the time this is called, and the
+    daemon will not pump again until the next prompt — so an ordered-out
+    window or a restored menu bar that is still sitting in the queue would
+    stay queued. This is the only thing that delivers them.
+    """
+    NSRunLoop.currentRunLoop().runUntilDate_(
+        NSDate.dateWithTimeIntervalSinceNow_(seconds)
+    )
 
 
 def _wake_event():
