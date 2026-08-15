@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from loop.app.view import ALL_ACTIONS, DashboardView
+from loop.gui.actions import Actions
 from loop.gui.widgets import (
     ActionLog, BurnMeter, ErrorBanner, HypothesisList, StackBar, StatusStrip,
     ThrashBanner,
@@ -42,20 +43,27 @@ ACTION_LABELS = {
 assert set(ACTION_ORDER) == ALL_ACTIONS == set(ACTION_LABELS)
 
 
-def _noop(checked: bool = False) -> None:
-    """Placeholder for every action's `triggered` signal. Task 12 wires
-    these to dialogs; nothing here decides what an action does."""
-
-
 class MainWindow(QMainWindow):
     def __init__(self, controller, mode: str = "dark") -> None:
         super().__init__()
         self._controller = controller
         self._mode = mode
         self._actions: dict[str, QAction] = {}
+        # `controller` is `None` in the clock-only tests (test_window.py) —
+        # they never click anything, so a runner-less window must still
+        # construct cleanly. `Actions` needs a `Writer`, which only a real
+        # controller has.
+        self._runner = (
+            Actions(window=self, controller=controller, writer=controller.writer)
+            if controller is not None else None
+        )
         self.setWindowTitle("loop")
         self.setMinimumSize(*MIN_SIZE)
         self._build()
+        if self._runner is not None:
+            self._runner.report.connect(self._on_report)
+            self._stack.resume_requested.connect(self._runner.run_resume)
+            self._hypotheses.kill_requested.connect(self._runner.run_hyp_kill)
 
     def has_active_loop(self) -> bool:
         return self._controller is not None and self._controller.active_id is not None
@@ -84,6 +92,10 @@ class MainWindow(QMainWindow):
         self._thrash = ThrashBanner()
         self._error = ErrorBanner()
         self._strip = StatusStrip()
+        self._report = QLabel()
+        self._report.setObjectName("muted")
+        self._report.setWordWrap(True)
+        self._report.setVisible(False)
         for widget in (self._toolbar, self._error, self._stack, self._clock,
                        self._meter, self._thrash):
             layout.addWidget(widget)
@@ -92,6 +104,7 @@ class MainWindow(QMainWindow):
         columns.addWidget(self._log, 1)
         layout.addLayout(columns)
         layout.addWidget(self._strip)
+        layout.addWidget(self._report)
         self.setCentralWidget(central)
 
     def _build_toolbar(self) -> QToolBar:
@@ -106,11 +119,21 @@ class MainWindow(QMainWindow):
         for name in ACTION_ORDER:
             action = QAction(ACTION_LABELS[name], self)
             action.setObjectName(name)
-            action.triggered.connect(_noop)
+            # `Actions.run` takes the CLI-style name, not a target id — the
+            # right entry point here, since a `QAction` never carries one.
+            # `hyp_kill` and `resume` resolve the id themselves (asking, or
+            # defaulting to "the most recent") when reached this way; the
+            # row controls that *do* have an id bypass `run` and call
+            # `run_hyp_kill`/`run_resume` directly (wired in `__init__`).
+            action.triggered.connect(lambda checked=False, n=name: self._trigger(n))
             toolbar.addAction(action)
             menu.addAction(action)
             self._actions[name] = action
         return toolbar
+
+    def _trigger(self, name: str) -> None:
+        if self._runner is not None:
+            self._runner.run(name)
 
     def bind(self, dashboard: DashboardView) -> None:
         """One place decides what is live. Ten scattered setEnabled
@@ -141,6 +164,26 @@ class MainWindow(QMainWindow):
         style = self._clock.style()
         style.unpolish(self._clock)
         style.polish(self._clock)
+
+    def _on_report(self, kind: str, text: str) -> None:
+        """`Actions.report` lands here. `"stale"` reads as `#muted` — the
+        outcome the user wanted already happened, so it is not styled as a
+        problem — and `"error"` as `#over`, the same crit colour the clock
+        uses when the loop runs long."""
+        self._report.setText(text)
+        self._report.setVisible(bool(text))
+        self._set_report_style("over" if kind == "error" else "muted")
+
+    def _set_report_style(self, name: str) -> None:
+        """Same gotcha as `_set_clock_over`: an `objectName` change on an
+        already-polished widget needs an explicit unpolish/polish or the
+        colour never updates."""
+        if self._report.objectName() == name:
+            return
+        self._report.setObjectName(name)
+        style = self._report.style()
+        style.unpolish(self._report)
+        style.polish(self._report)
 
 
 def _mmss(seconds: float) -> str:
