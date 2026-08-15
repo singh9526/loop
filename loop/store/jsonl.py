@@ -1,8 +1,13 @@
 """The append-only event log.
 
-One JSON object per line. Appends are a single `write` of a line, which is
-atomic on POSIX for payloads under PIPE_BUF, so a crash can damage at most
-the final line.
+One JSON object per line. Every append in this codebase runs while its
+caller holds the exclusive lock from `loop.store.lock` — see
+`loop/app/writer.py`, which is the only place that calls `append`. That is
+what makes concurrent writers safe on Windows, which offers no equivalent
+of POSIX's atomic-append-under-PIPE_BUF.
+
+A crash mid-append can still damage the final line, and `read_all`
+tolerates exactly that.
 """
 
 from __future__ import annotations

@@ -29,7 +29,8 @@ def test_linux_default_respects_xdg(tmp_path, monkeypatch):
     assert paths.loop_home() == tmp_path / "xdg" / "loop"
 
 
-def test_events_and_pid_live_under_home(tmp_path, monkeypatch):
+def test_events_and_lock_live_under_home(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOP_HOME", str(tmp_path))
     assert paths.events_path() == tmp_path / "events.jsonl"
+    assert paths.lock_path() == tmp_path / "lock"
     assert paths.pid_path() == tmp_path / "daemon.pid"
