@@ -143,7 +143,7 @@ def cmd_open(args, state: State, now: float) -> dict:
     hypotheses = prompts.ask_lines("hypotheses?", minimum=1)
 
     result = commands.open_loop(
-        Writer(),
+        Writer(now=lambda: now),
         question=args.question,
         stop_condition=stop_condition,
         budget_s=budget_s,
@@ -166,18 +166,20 @@ def cmd_open(args, state: State, now: float) -> dict:
 
 
 def cmd_try(args, state: State, now: float) -> dict:
-    result = commands.log_action(Writer(), action=args.action, because=args.because)
+    result = commands.log_action(
+        Writer(now=lambda: now), action=args.action, because=args.because
+    )
     say(f"  logged. {result.actions} actions this loop.")
     return result.event
 
 
 def cmd_hyp(args, state: State, now: float) -> dict:
     if args.hyp_command == "add":
-        result = commands.add_hypothesis(Writer(), text=args.text)
+        result = commands.add_hypothesis(Writer(now=lambda: now), text=args.text)
         say(f"  hypothesis {result.hyp_id} added. {result.live} live.")
         return result.event
 
-    result = commands.kill_hypothesis(Writer(), hyp_id=args.hyp_id)
+    result = commands.kill_hypothesis(Writer(now=lambda: now), hyp_id=args.hyp_id)
     say(f"  hypothesis {result.hyp_id} ruled out. {result.live} live.")
     return result.event
 
@@ -192,7 +194,7 @@ def cmd_status(args, state: State, now: float) -> dict:
 def cmd_pause(args, state: State, now: float) -> dict:
     require_active(state)
     reason = args.reason or prompts.ask_text("what interrupted?")
-    result = commands.pause(Writer(), reason=reason)
+    result = commands.pause(Writer(now=lambda: now), reason=reason)
     say(f"  #{result.loop_id} paused at {format_duration(result.elapsed_s)} active.")
     return result.event
 
@@ -211,7 +213,9 @@ def cmd_resume(args, state: State, now: float) -> dict:
         if active is not None and active.id != args.loop_id
         else None
     )
-    result = commands.resume(Writer(), loop_id=args.loop_id, pause_reason=pause_reason)
+    result = commands.resume(
+        Writer(now=lambda: now), loop_id=args.loop_id, pause_reason=pause_reason
+    )
     _say_resumed(result.summary)
     daemon.ensure_running()
     return result.event
@@ -227,7 +231,7 @@ def _say_resumed(summary) -> None:
 def cmd_close(args, state: State, now: float) -> dict:
     require_active(state)
     result = commands.close(
-        Writer(),
+        Writer(now=lambda: now),
         what_was_it=prompts.ask_text("what was it?"),
         giveaway=prompts.ask_text("what was the giveaway?"),
         five_min_path=prompts.ask_text("how could I have found it in 5 minutes?"),
@@ -240,7 +244,7 @@ def cmd_close(args, state: State, now: float) -> dict:
 
 
 def cmd_abandon(args, state: State, now: float) -> dict:
-    result = commands.abandon(Writer())
+    result = commands.abandon(Writer(now=lambda: now))
     say(f"  abandoned #{result.loop_id} at {format_duration(result.elapsed_s)} active.")
     if result.resumed is not None:
         _say_resumed(result.resumed)
@@ -328,6 +332,13 @@ def main(argv: list[str] | None = None) -> int:
     global _QUIET
     args = build_parser().parse_args(argv)
     _QUIET = args.json
+    # One clock reading per invocation, threaded into every command's Writer
+    # as `Writer(now=lambda: now)`. A CLI command is a single instant from
+    # the user's point of view, and the minutes they spend answering
+    # `close`'s postmortem prompts are not minutes the loop was running: a
+    # Writer left on its own `time.time` would stamp `loop_closed` at the
+    # moment of the last answer, inflating `closed_at`, elapsed-at-close, and
+    # every estimate-drift figure derived from them.
     now = time.time()
     try:
         result = COMMANDS[args.command](args, load_state(), now)
