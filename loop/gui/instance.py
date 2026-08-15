@@ -16,28 +16,54 @@ CONNECT_TIMEOUT_MS = 300
 SURFACE = b"surface\n"
 
 
+class ClaimError(RuntimeError):
+    """The socket could not be bound for a reason other than a live
+    incumbent — permissions, fd exhaustion, and the like. The caller must
+    surface this, not treat it like a quiet hand-off."""
+
+
+def _probe(name: str) -> bool:
+    """Return True if a live instance answered `name` — and was asked to
+    surface, as a side effect of getting an answer at all."""
+    probe = QLocalSocket()
+    probe.connectToServer(name)
+    if not probe.waitForConnected(CONNECT_TIMEOUT_MS):
+        return False
+    probe.write(SURFACE)
+    probe.flush()
+    probe.waitForBytesWritten(CONNECT_TIMEOUT_MS)
+    probe.disconnectFromServer()
+    return True
+
+
 def claim(app: QCoreApplication) -> QLocalServer | None:
     """Become the single instance, or ask the incumbent to show itself.
 
-    Returns the server on success, `None` when another copy answered.
+    Returns the server on success, `None` when another copy answered and
+    was asked to surface. Raises `ClaimError` when the name could not be
+    bound for any other reason — that is a real failure and must not be
+    mistaken for a hand-off.
     """
     name = server_name()
 
-    probe = QLocalSocket()
-    probe.connectToServer(name)
-    if probe.waitForConnected(CONNECT_TIMEOUT_MS):
-        probe.write(SURFACE)
-        probe.flush()
-        probe.waitForBytesWritten(CONNECT_TIMEOUT_MS)
-        probe.disconnectFromServer()
+    if _probe(name):
         return None
 
     server = QLocalServer(app)
-    if not server.listen(name):
-        # Nobody answered but the name is taken: a socket file left behind
-        # by a hard kill. Clearing it is safe precisely because the connect
-        # above failed.
-        QLocalServer.removeServer(name)
-        if not server.listen(name):
-            return None
-    return server
+    if server.listen(name):
+        return server
+
+    # The name is taken but nobody answered just now. Two explanations:
+    # a socket file left behind by a hard kill (safe to reclaim), or a
+    # second launch racing this one, which bound the name in the gap
+    # between our probe above and the listen() just now (must not steal
+    # it). Re-probe before touching anything — only a socket that still
+    # answers nothing is safe to remove.
+    if _probe(name):
+        return None
+
+    QLocalServer.removeServer(name)
+    if server.listen(name):
+        return server
+
+    raise ClaimError(f"could not bind single-instance socket {name!r}")

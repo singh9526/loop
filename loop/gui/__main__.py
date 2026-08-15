@@ -20,11 +20,23 @@ def detect_mode(app: QApplication) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    app = QApplication(argv if argv is not None else sys.argv)
+    # An existing instance is reused rather than always constructing one:
+    # QApplication is a process-wide singleton, and reusing it is what
+    # lets tests drive main() inside a session that already has a qapp.
+    # In a real launch nothing pre-exists, so this is always the
+    # QApplication(argv) branch there.
+    app = QApplication.instance() or QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName("loop")
     app.setQuitOnLastWindowClosed(False)  # the tray outlives the window
 
-    server = instance.claim(app)
+    try:
+        server = instance.claim(app)
+    except instance.ClaimError as exc:
+        # A genuine bind failure is not a hand-off: silence here would be
+        # a launch that does nothing, with no way for the user to tell
+        # that from success.
+        print(f"loop-gui: {exc}", file=sys.stderr)
+        return 1
     if server is None:
         return 0  # another copy is up; it has been asked to surface
 
