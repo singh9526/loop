@@ -325,3 +325,31 @@ def extend_budget(writer: Writer, *, new_budget_s: float, learned: str) -> Budge
         )
 
     return writer.mutate(build)
+
+
+def record_checkpoint_shown(writer: Writer, *, loop_id: int, kind: str) -> None:
+    """Forensics only: `fold` carries no state for this event. It exists so
+    a timed-out checkpoint can be told from one that was never displayed."""
+    writer.mutate(lambda state, now: (
+        [events.make("checkpoint_shown", ts=now, loop_id=loop_id, kind=kind)], None
+    ))
+
+
+def record_checkin(writer: Writer, *, due, answers) -> bool:
+    """Write a check-in's answers, unless the world moved while it was up.
+
+    A blocking prompt can sit for five minutes. If the loop it was built
+    for was closed, abandoned, or paused from elsewhere in that time, the
+    answers are about a state that no longer exists. Checking that inside
+    the lock — rather than in a separate read, as `sched/tick.py` did —
+    closes the window between the check and the append.
+    """
+    from loop.app import checkin
+
+    def build(state: State, now: float):
+        if state.active_id != due.loop_id:
+            return [], False
+        loop = state.loops[due.loop_id]
+        return checkin.answers_to_events(loop, due, answers, now), True
+
+    return writer.mutate(build)
