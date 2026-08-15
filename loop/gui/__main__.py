@@ -7,6 +7,7 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 from loop.gui import instance, theme
+from loop.gui.controller import Controller
 from loop.gui.tray import Tray
 from loop.gui.window import MainWindow
 
@@ -43,10 +44,18 @@ def main(argv: list[str] | None = None) -> int:
     mode = detect_mode(app)
     app.setStyleSheet(theme.stylesheet(mode))
 
-    window = MainWindow(controller=None)
+    controller = Controller()
+    window = MainWindow(controller, mode)
     tray = Tray(window, mode)
+    controller.changed.connect(window.bind)
+    controller.changed.connect(
+        lambda dashboard: tray.set_burn(
+            dashboard.meter.fraction if dashboard.meter else None
+        )
+    )
     tray.show()
     window.show()
+    controller.start()
 
     server.newConnection.connect(lambda: _surface(server, window))
     return app.exec()
