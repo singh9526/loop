@@ -165,7 +165,6 @@ def test_resume_of_a_closed_loop_names_its_status():
         commands.resume(writer, loop_id=1, pause_reason=None)
 
 
-@pytest.mark.xfail(reason="kill_hypothesis arrives in Task 5", strict=True)
 def test_close_records_the_postmortem_and_the_counts():
     clock = Clock()
     writer = writer_at(clock)

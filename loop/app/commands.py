@@ -216,3 +216,112 @@ def _with_parent_pop(state: State, loop: Loop, now: float, written: list[dict]):
         return written, None
     written.append(events.make("loop_resumed", ts=now, loop_id=parent.id))
     return written, _summary(parent, now)
+
+
+@dataclass(frozen=True, slots=True)
+class Logged:
+    event: dict
+    actions: int
+
+
+@dataclass(frozen=True, slots=True)
+class HypothesisAdded:
+    event: dict
+    hyp_id: int
+    live: int
+
+
+@dataclass(frozen=True, slots=True)
+class HypothesisKilled:
+    event: dict
+    hyp_id: int
+    live: int
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeCut:
+    event: dict
+    old_stop_condition: str
+    new_stop_condition: str
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetExtended:
+    event: dict
+    old_budget_s: float
+    new_budget_s: float
+
+
+def log_action(writer: Writer, *, action: str, because: str) -> Logged:
+    def build(state: State, now: float):
+        loop = _require_active(state)
+        event = events.make(
+            "action_logged", ts=now, loop_id=loop.id, action=action, because=because
+        )
+        return [event], Logged(event=event, actions=loop.actions + 1)
+
+    return writer.mutate(build)
+
+
+def add_hypothesis(writer: Writer, *, text: str) -> HypothesisAdded:
+    def build(state: State, now: float):
+        loop = _require_active(state)
+        event = events.make(
+            "hypothesis_added", ts=now, loop_id=loop.id,
+            hyp_id=events.next_hypothesis_id(loop), text=text,
+        )
+        return [event], HypothesisAdded(
+            event=event, hyp_id=event["hyp_id"], live=len(loop.live_hypotheses()) + 1,
+        )
+
+    return writer.mutate(build)
+
+
+def kill_hypothesis(writer: Writer, *, hyp_id: int) -> HypothesisKilled:
+    def build(state: State, now: float):
+        loop = _require_active(state)
+        target = next((h for h in loop.hypotheses if h.id == hyp_id), None)
+        if target is None:
+            # Verbatim from cli.py:198 — tests/test_cli_open.py asserts it.
+            raise LoopError(f"no live hypothesis {hyp_id}.")
+        if not target.alive:
+            # Almost always a check-in got here first. Nothing to fix.
+            raise StaleError(f"§{hyp_id} {target.text} was already ruled out.")
+        event = events.make(
+            "hypothesis_eliminated", ts=now, loop_id=loop.id, hyp_id=hyp_id
+        )
+        return [event], HypothesisKilled(
+            event=event, hyp_id=hyp_id, live=len(loop.live_hypotheses()) - 1,
+        )
+
+    return writer.mutate(build)
+
+
+def cut_scope(writer: Writer, *, new_stop_condition: str) -> ScopeCut:
+    def build(state: State, now: float):
+        loop = _require_active(state)
+        event = events.make(
+            "scope_cut", ts=now, loop_id=loop.id,
+            old_stop_condition=loop.stop_condition,
+            new_stop_condition=new_stop_condition,
+        )
+        return [event], ScopeCut(
+            event=event, old_stop_condition=loop.stop_condition,
+            new_stop_condition=new_stop_condition,
+        )
+
+    return writer.mutate(build)
+
+
+def extend_budget(writer: Writer, *, new_budget_s: float, learned: str) -> BudgetExtended:
+    def build(state: State, now: float):
+        loop = _require_active(state)
+        event = events.make(
+            "budget_extended", ts=now, loop_id=loop.id,
+            old_budget_s=loop.budget_s, new_budget_s=new_budget_s, learned=learned,
+        )
+        return [event], BudgetExtended(
+            event=event, old_budget_s=loop.budget_s, new_budget_s=new_budget_s,
+        )
+
+    return writer.mutate(build)
