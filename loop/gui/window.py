@@ -7,14 +7,12 @@ places widgets and copies fields onto them.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QMainWindow, QToolBar, QVBoxLayout, QWidget,
 )
 
 from loop.app.view import ALL_ACTIONS, DashboardView
-from loop.gui import theme
 from loop.gui.widgets import (
     ActionLog, BurnMeter, ErrorBanner, HypothesisList, StackBar, StatusStrip,
     ThrashBanner,
@@ -79,7 +77,6 @@ class MainWindow(QMainWindow):
         self._toolbar = self._build_toolbar()
         self._clock = QLabel("—")
         self._clock.setObjectName("clock")
-        self._clock.setTextFormat(Qt.TextFormat.RichText)
         self._meter = BurnMeter(self._mode)
         self._stack = StackBar()
         self._hypotheses = HypothesisList()
@@ -120,11 +117,30 @@ class MainWindow(QMainWindow):
         calls would each be a place to forget."""
         for name, action in self._actions.items():
             action.setEnabled(name in dashboard.enabled_actions)
-        self._clock.setText(_clock_text(dashboard, self._mode))
+        self._clock.setText(_clock_text(dashboard))
+        self._set_clock_over(dashboard.meter is not None and dashboard.meter.over_s > 0.0)
         self._meter.set_meter(dashboard.meter)
         for panel in (self._stack, self._hypotheses, self._log,
                       self._thrash, self._error, self._strip):
             panel.bind(dashboard)
+
+    def _set_clock_over(self, over: bool) -> None:
+        """State lives in the object name, not in the text — `theme.py`'s
+        `QLabel#over` rule (font matched to `#clock`, colour crit) does the
+        colouring, so `_clock.text()` stays plain in both states.
+
+        Qt caches a widget's resolved style at polish time and will not
+        re-derive it just because `objectName` changed — the label would
+        keep rendering with its old colour forever without an explicit
+        unpolish/polish to force it.
+        """
+        name = "over" if over else "clock"
+        if self._clock.objectName() == name:
+            return
+        self._clock.setObjectName(name)
+        style = self._clock.style()
+        style.unpolish(self._clock)
+        style.polish(self._clock)
 
 
 def _mmss(seconds: float) -> str:
@@ -133,16 +149,14 @@ def _mmss(seconds: float) -> str:
     return f"{minutes}:{secs:02d}"
 
 
-def _clock_text(dashboard: DashboardView, mode: str) -> str:
+def _clock_text(dashboard: DashboardView) -> str:
+    """Plain text only — colour for the over-budget state comes from
+    `objectName` + the stylesheet, never from markup in the string."""
     meter = dashboard.meter
     if meter is None:
         return "—"
     elapsed = _mmss(meter.elapsed_s)
     budget = _mmss(meter.budget_s)
     if meter.over_s > 0.0:
-        crit = theme.TOKENS[mode]["crit"]
-        return (
-            f'<span style="color:{crit};">{elapsed}</span> / {budget}'
-            f" &middot; over by {_mmss(meter.over_s)}"
-        )
+        return f"{elapsed} / {budget} · over by {_mmss(meter.over_s)}"
     return f"{elapsed} / {budget}"

@@ -32,7 +32,7 @@ QFrame#panel { background: %(panel)s; border: 1px solid %(line)s; border-radius:
 QLabel#question { font-size: 18px; font-weight: 600; }
 QLabel#label { color: %(dim)s; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; }
 QLabel#muted { color: %(muted)s; }
-QLabel#clock { font-family: %(mono)s; font-size: 26px; font-weight: 600; }
+QLabel#clock, QLabel#over { font-family: %(mono)s; font-size: 26px; font-weight: 600; }
 QLabel#over { color: %(crit)s; }
 QPushButton {
     background: %(raised)s; color: %(text)s; border: 1px solid %(line)s;
