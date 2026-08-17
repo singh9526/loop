@@ -8,6 +8,13 @@ Both platforms poll a non-blocking acquire rather than using a blocking
 one, so `timeout_s` means the same thing on each. `flock` would otherwise
 wait forever and `msvcrt.locking`'s LK_LOCK would impose its own ten
 one-second retries.
+
+Each side catches only the exception that means "someone else holds it"
+— `BlockingIOError` (`EWOULDBLOCK`) on POSIX, `PermissionError` (`EACCES`)
+on Windows, both raised by the stdlib as that specific subclass rather
+than a bare `OSError`. Anything else — a bad handle, a real permission
+fault — is a genuine failure and must propagate immediately instead of
+being retried for `timeout_s` and reported as a misleading `LockTimeout`.
 """
 
 from __future__ import annotations
@@ -31,7 +38,14 @@ if sys.platform == "win32":  # pragma: no cover - exercised on Windows only
         try:
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             return True
-        except OSError:
+        except PermissionError:
+            # `LK_NBLCK` fails with errno EACCES when another handle
+            # already holds the byte range — Python's OSError constructor
+            # turns that specific errno into PermissionError, the same way
+            # it turns EWOULDBLOCK into BlockingIOError on POSIX. That is
+            # contention, the only outcome worth retrying. A bare `except
+            # OSError` here previously also caught a bad handle (EBADF) or
+            # any other fault and silently retried it too.
             return False
 
     def _release(handle) -> None:

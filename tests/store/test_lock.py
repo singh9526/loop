@@ -23,6 +23,28 @@ def test_exclusive_is_reentrant_across_sequential_holds(tmp_path):
             pass
 
 
+def test_exclusive_seeks_to_the_start_before_the_first_acquire_attempt(tmp_path, monkeypatch):
+    """`path.open("a+b")` positions the handle at EOF. `msvcrt.locking` on
+    Windows locks a byte range starting at the *current* position, so
+    locking from EOF would lock the wrong bytes (or none, on a file that
+    later grows) instead of byte 0 — the range every process in this
+    codebase agrees to contend on. POSIX's `flock` does not care about
+    position, so nothing else in this suite would catch a missing seek;
+    this pins the seek itself rather than a symptom only Windows would
+    show."""
+    positions: list[int] = []
+    real_try_acquire = lock._try_acquire
+
+    def spy(handle):
+        positions.append(handle.tell())
+        return real_try_acquire(handle)
+
+    monkeypatch.setattr(lock, "_try_acquire", spy)
+    with lock.exclusive(tmp_path / "lock"):
+        pass
+    assert positions == [0]
+
+
 HOLD_PROGRAM = textwrap.dedent("""
     import sys, time
     from pathlib import Path
