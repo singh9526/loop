@@ -264,39 +264,26 @@ def cmd_stats(args, state: State, now: float) -> dict:
 
 
 def cmd_grep(args, state: State, now: float) -> dict:
-    from loop.core.models import ABANDONED, CLOSED
+    from loop.core import search
 
-    term = args.term.lower()
     log = jsonl.read_all()  # read once; re-reading per loop was O(loops * log)
-    matches: list[dict] = []
-
-    for loop in state.loops.values():
-        if loop.status not in (CLOSED, ABANDONED):
-            continue
-        hits = [
-            (label, text)
-            for label, text in (loop.postmortem or {}).items()
-            if term in text.lower()
-        ]
-        hits += [
-            ("action", f"{event['action']} — because {event['because']}")
-            for event in log
-            if event["type"] == "action_logged"
-            and event["loop_id"] == loop.id
-            and (term in event["action"].lower() or term in event["because"].lower())
-        ]
-        if hits:
-            matches.append({"loop_id": loop.id, "question": loop.question, "hits": hits})
+    matches = search.find(state, log, args.term)
 
     if not matches:
         say(f"  no matches for {args.term!r}.")
         return {"matches": []}
 
+    result: list[dict] = []
     for match in matches:
-        say(f"  #{match['loop_id']}  {match['question']}")
-        for label, text in match["hits"]:
-            say(f"      {label}: {text}")
-    return {"matches": matches}
+        say(f"  #{match.loop_id}  {match.question}")
+        for hit in match.hits:
+            say(f"      {hit.label}: {hit.text}")
+        result.append({
+            "loop_id": match.loop_id,
+            "question": match.question,
+            "hits": [(hit.label, hit.text) for hit in match.hits],
+        })
+    return {"matches": result}
 
 
 COMMANDS = {

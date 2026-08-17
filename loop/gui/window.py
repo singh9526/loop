@@ -2,18 +2,23 @@
 
 Binds to `DashboardView` and nothing else — every string and every
 enabled/disabled decision was made in `loop.app.view`; this module only
-places widgets and copies fields onto them.
+places widgets and copies fields onto them. It also hosts the logbook
+(`loop.gui.logbook.LogbookView`) as a second page of the same central
+stack, toggled by a menu action and a button next to the status strip —
+that page binds itself; this module only switches to it.
 """
 
 from __future__ import annotations
 
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QMainWindow, QToolBar, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QMainWindow, QPushButton, QStackedWidget, QToolBar,
+    QVBoxLayout, QWidget,
 )
 
 from loop.app.view import ALL_ACTIONS, DashboardView
 from loop.gui.actions import Actions
+from loop.gui.logbook import LogbookView
 from loop.gui.widgets import (
     ActionLog, BurnMeter, ErrorBanner, HypothesisList, StackBar, StatusStrip,
     ThrashBanner,
@@ -103,9 +108,26 @@ class MainWindow(QMainWindow):
         columns.addWidget(self._hypotheses, 1)
         columns.addWidget(self._log, 1)
         layout.addLayout(columns)
-        layout.addWidget(self._strip)
+
+        strip_row = QHBoxLayout()
+        strip_row.addWidget(self._strip, 1)
+        self._logbook_button = QPushButton("Logbook")
+        self._logbook_button.clicked.connect(lambda checked=False: self._toggle_logbook())
+        strip_row.addWidget(self._logbook_button)
+        layout.addLayout(strip_row)
+
         layout.addWidget(self._report)
-        self.setCentralWidget(central)
+
+        # The dashboard and the logbook are two pages of one stack, not two
+        # calls to `setCentralWidget` — `QMainWindow` deletes whatever
+        # widget it replaces, so swapping the central widget back and
+        # forth would destroy the dashboard the first time the user left
+        # it.
+        self._logbook = LogbookView(self._controller)
+        self._pages = QStackedWidget(self)
+        self._pages.addWidget(central)
+        self._pages.addWidget(self._logbook)
+        self.setCentralWidget(self._pages)
 
     def _build_toolbar(self) -> QToolBar:
         """A plain widget row placed by the central layout, not a
@@ -129,11 +151,30 @@ class MainWindow(QMainWindow):
             toolbar.addAction(action)
             menu.addAction(action)
             self._actions[name] = action
+
+        # A second menu for the read-only view toggle — not one of the ten
+        # `ALL_ACTIONS`, so it does not go through `Actions.run`: there is
+        # no command to dispatch, only a page to switch to.
+        view_menu = self.menuBar().addMenu("&View")
+        self._logbook_action = QAction("Logbook", self)
+        self._logbook_action.triggered.connect(lambda checked=False: self._toggle_logbook())
+        view_menu.addAction(self._logbook_action)
         return toolbar
 
     def _trigger(self, name: str) -> None:
         if self._runner is not None:
             self._runner.run(name)
+
+    def _toggle_logbook(self) -> None:
+        """Flip between the dashboard and the logbook. Entering the
+        logbook refreshes it, so it never shows a stale search from the
+        last time it was open; leaving it costs nothing to refresh
+        because the dashboard already redraws on every poll."""
+        if self._pages.currentWidget() is self._logbook:
+            self._pages.setCurrentIndex(0)
+        else:
+            self._logbook.refresh()
+            self._pages.setCurrentWidget(self._logbook)
 
     def bind(self, dashboard: DashboardView) -> None:
         """One place decides what is live. Ten scattered setEnabled
