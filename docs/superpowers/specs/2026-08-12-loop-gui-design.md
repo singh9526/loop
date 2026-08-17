@@ -571,10 +571,66 @@ optional extra, `loop-tool[gui]`.
 Every writer in this codebase does, and the grep test keeps it that way, but
 an editor writing to `events.jsonl` will not.
 
-**Windows is designed for, not yet tested on.** The lock branch, the spawn
-flags, the tray, and the full-screen geometry all have Windows paths in this
-spec written from documentation. A real pass on Windows is the last build step
-and is expected to find something.
+**Windows: audited (Task 17), one real defect found and fixed, still not run
+on real hardware.** No Windows machine was available for this pass; every
+platform-dependent site was audited by reading and by simulating
+`sys.platform`/`os.name` in tests, never by executing on Windows.
+
+Found and fixed: `loop/store/lock.py`'s Windows `_try_acquire` caught bare
+`except OSError`, so a genuine fault (bad handle, anything other than lock
+contention) was silently retried for `timeout_s` and reported as a
+misleading `LockTimeout` instead of itself. POSIX's `except BlockingIOError`
+never had this problem — it only ever catches the specific exception that
+means contention. Fixed to `except PermissionError`, matching the specific
+errno (`EACCES`) `msvcrt.locking(LK_NBLCK, ...)` raises for contention;
+Python's `OSError` constructor turns that errno into `PermissionError`
+automatically, the same mechanism that turns `EWOULDBLOCK` into
+`BlockingIOError` on POSIX. Pinned by `tests/store/test_lock_windows.py`,
+which reloads `loop.store.lock` under a faked `msvcrt` and simulated
+`sys.platform == "win32"` to exercise the branch at all — this machine has
+no `msvcrt` to import. Verified by mutation: reverting to `except OSError`
+makes `test_a_genuine_fault_is_not_caught_as_contention` and
+`test_exclusive_surfaces_a_genuine_windows_fault_immediately` fail, the
+second by waiting out the full timeout and raising `LockTimeout`.
+
+Audited and left as-is, no code change: `loop/store/paths.py`'s `%APPDATA%`
+resolution (was correct, just untested — coverage added); `loop/app/
+launcher.py`'s `ensure_running()` (already used `creationflags=
+DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` instead of `start_new_session`
+on `win32`, written in Task 10 from documentation — coverage added,
+correctness unconfirmed on real Windows); `loop/gui/instance.py` (no
+platform-conditional code at all — `QLocalServer`/`QLocalSocket` own the
+platform difference; Windows named pipes don't leave a stale-socket
+artifact behind a hard kill the way POSIX does, so the `removeServer` +
+re-probe path is expected to rarely execute there, which is a behavioural
+difference worth knowing, not a bug); `loop/gui/checkin.py`'s window flags
+(`Qt.Tool` was dropped in Task 13 specifically for a macOS-only failure mode
+— tool windows hiding on app deactivation — and Windows has no such
+behaviour, so the window being `Qt.Window` there costs only a taskbar/
+Alt-Tab entry it would not otherwise have, not function).
+
+Confirmed, platform-independent, not a guess: Qt's style-sheet engine does
+not implement CSS's generic `monospace`/`sans-serif` keywords — the last
+entry in each of `theme.MONO`/`theme.UI`'s font stacks is inert on every
+platform, not just Windows. Verified with a synthetic A/B font-family list
+(two nonexistent names, with and without the trailing keyword — both
+resolve identically). Low practical risk since `Consolas`/`Segoe UI` are
+guaranteed present on any supported Windows version and sit ahead of the
+inert keyword in the chain, but the true fallback if a Windows build lacks
+even those is Qt's default application font, not any kind of serif.
+`theme.MONO`/`theme.UI` were left unchanged (constants keep their values);
+pinned by `tests/gui/test_fonts.py`.
+
+**What is still genuinely unverified**, itemized with what a Windows machine
+would need to check, in `docs/manual-smoke-checklist.md`'s "Windows-only
+checks" section: font resolution on a real Windows font database, the
+light/dark palette following the OS setting, multi-monitor coverage under
+mixed per-monitor DPI scaling, single-instance reclaim timing after a hard
+kill, the taskbar/Alt-Tab presence of the check-in window, whether
+`DETACHED_PROCESS` actually prevents a console flash on auto-launch, tray
+icon click behaviour, and `%APPDATA%` resolution for usernames with spaces
+or non-ASCII characters. None of this was run; all of it needs a real
+Windows session before "Windows support" is a claim this project can make.
 
 ---
 
