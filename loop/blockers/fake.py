@@ -1,4 +1,4 @@
-"""A blocker that answers from a script. Used by tests and `LOOP_BLOCKER=fake`."""
+"""A blocker that answers from a script. Used by tests."""
 
 from __future__ import annotations
 

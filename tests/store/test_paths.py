@@ -33,4 +33,3 @@ def test_events_and_lock_live_under_home(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOP_HOME", str(tmp_path))
     assert paths.events_path() == tmp_path / "events.jsonl"
     assert paths.lock_path() == tmp_path / "lock"
-    assert paths.pid_path() == tmp_path / "daemon.pid"

@@ -5,7 +5,6 @@ from loop.blockers import base
 
 def test_timeouts_are_the_specified_values():
     assert base.TIMEOUT_S == 300.0
-    assert base.KILL_AFTER_S == 310.0
 
 
 @pytest.mark.parametrize(

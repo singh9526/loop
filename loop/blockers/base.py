@@ -1,8 +1,11 @@
-"""The contract between the scheduler and whatever draws on the screen.
+"""The contract between the scheduler and whatever draws a check-in on screen.
 
-Nothing in `loop.blockers` may import `loop.core`. That is the seam: a
-Windows overlay is a new file implementing `ask`, and the domain logic
-never learns which one ran.
+Nothing here may import from the core package. That is the seam: a new
+platform's check-in is a new file implementing `ask`, and the domain
+logic never learns which one ran. Today that file is `gui/checkin.py`,
+not anything under `loop/blockers/` — this module only defines the
+shared contract (`Prompt`, `Answers`) and the pieces every implementation
+reuses (`format_countdown`, `remaining_fraction`).
 """
 
 from __future__ import annotations
@@ -11,7 +14,6 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 TIMEOUT_S = 300.0
-KILL_AFTER_S = 310.0
 
 
 @dataclass(frozen=True, slots=True)

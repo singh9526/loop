@@ -35,7 +35,3 @@ def events_path() -> Path:
 
 def lock_path() -> Path:
     return loop_home() / "lock"
-
-
-def pid_path() -> Path:
-    return loop_home() / "daemon.pid"

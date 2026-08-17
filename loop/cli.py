@@ -8,14 +8,12 @@ import sys
 import time
 
 from loop import prompts, render
-from loop.app import commands
+from loop.app import commands, launcher
 from loop.app.errors import LoopError  # noqa: F401  (re-exported; callers import it from here)
 from loop.app.writer import Writer
-from loop.blockers.factory import BlockerUnavailable, get_blocker
 from loop.core import events
 from loop.core.models import MAX_STACK_DEPTH, WARN_STACK_DEPTH, State
 from loop.core.timefmt import format_duration
-from loop.sched import daemon
 from loop.store import jsonl, lock
 
 DEFAULT_BUDGET_S = 2700.0
@@ -54,16 +52,14 @@ def require_active(state: State) -> None:
         raise LoopError("no active loop. run `loop open \"<question>\"` first.")
 
 
-def require_blocker() -> None:
+def require_app() -> None:
     """Fail loudly, before any event is written, if nothing can show a check-in.
 
-    `loop open`/`loop resume` must never leave a timer running that the
-    daemon can never surface a prompt for.
+    `loop open` / `loop resume` must never leave a timer running that
+    nothing will ever interrupt.
     """
-    try:
-        get_blocker()
-    except BlockerUnavailable as exc:
-        raise LoopError(str(exc)) from exc
+    if not launcher.available():
+        raise LoopError(launcher.UNAVAILABLE_MESSAGE)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -101,8 +97,6 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("close", help="close the active loop with a postmortem", parents=[common])
     subparsers.add_parser("abandon", help="abandon the active loop", parents=[common])
 
-    subparsers.add_parser("tick", help="internal: run one scheduler tick", parents=[common])
-
     subparsers.add_parser("stats", help="the logbook", parents=[common])
     grepper = subparsers.add_parser(
         "grep", help="search closed and abandoned loops", parents=[common]
@@ -114,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_open(args, state: State, now: float) -> dict:
-    require_blocker()
+    require_app()
 
     # Advisory copies of two checks open_loop makes under the lock. They run
     # here so a refusal costs four keystrokes, not forty. The copies inside
@@ -161,7 +155,7 @@ def cmd_open(args, state: State, now: float) -> dict:
         say(f"  stack depth {result.depth}.")
     if result.depth >= WARN_STACK_DEPTH:
         say("  ⚠  you are context switching, not working.")
-    daemon.ensure_running()
+    launcher.ensure_running()
     return result.event
 
 
@@ -200,7 +194,7 @@ def cmd_pause(args, state: State, now: float) -> dict:
 
 
 def cmd_resume(args, state: State, now: float) -> dict:
-    require_blocker()
+    require_app()
 
     # Asked here, before the write, because `resume` needs the answer and
     # only the terminal can collect it. `args.loop_id` may be None, in which
@@ -217,7 +211,7 @@ def cmd_resume(args, state: State, now: float) -> dict:
         Writer(now=lambda: now), loop_id=args.loop_id, pause_reason=pause_reason
     )
     _say_resumed(result.summary)
-    daemon.ensure_running()
+    launcher.ensure_running()
     return result.event
 
 
@@ -258,13 +252,6 @@ def cmd_ls(args, state: State, now: float) -> dict:
         "active_id": state.active_id,
         "paused_ids": [lp.id for lp in state.paused_loops()],
     }
-
-
-def cmd_tick(args, state: State, now: float) -> dict:
-    from loop.sched.tick import tick
-
-    due = tick(now=None)
-    return {"fired": None if due is None else due.kind}
 
 
 def cmd_stats(args, state: State, now: float) -> dict:
@@ -322,7 +309,6 @@ COMMANDS = {
     "close": cmd_close,
     "abandon": cmd_abandon,
     "status": cmd_status,
-    "tick": cmd_tick,
     "stats": cmd_stats,
     "grep": cmd_grep,
 }
