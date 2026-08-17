@@ -170,9 +170,17 @@ class Scheduler(QObject):
         the same branch: the answer here is still valid, so it is retried,
         bounded, off the timer, before ever being given up on. Any other
         exception — a real bug, not contention — releases the guard before
-        propagating too, the same as every other exit: a stranded `True`
-        would silently stop every future check-in, worse than the bug this
-        method exists to fix.
+        propagating too, the same as every other exit, and on
+        `BaseException` rather than `Exception`: the lock wait inside
+        `record_checkin` is a window up to ten seconds wide for a Ctrl-C
+        in the terminal that launched `loop-gui` to land here. A stranded
+        `True` no longer merely silences check-ins — `busy_changed` never
+        fires false, so every action stays greyed out and even the tray's
+        Quit refuses. Inert, and unquittable from the tray.
+
+        Every handler in this method that releases the guard catches
+        `BaseException` for that reason; the postmortem below uses a
+        `finally`, which needs no exception class at all.
 
         A p100 answered `stop now` opens the postmortem from here, and
         only from here: "once the checkpoint event is written" is the
@@ -195,7 +203,7 @@ class Scheduler(QObject):
                         RECORD_RETRY_MS,
                         lambda: self._write_answer(due, answers, attempt + 1),
                     )
-                except Exception:
+                except BaseException:
                     self._set_busy(False)
                     raise
                 return
@@ -214,7 +222,7 @@ class Scheduler(QObject):
             )
             self._controller.refresh()
             return
-        except Exception:
+        except BaseException:
             self._set_busy(False)
             raise
 

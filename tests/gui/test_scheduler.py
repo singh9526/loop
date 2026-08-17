@@ -276,6 +276,87 @@ def test_an_unexpected_exception_writing_the_answer_still_releases_the_guard(wir
     assert len(blocker2.prompts) == 1, "a released guard must allow a later tick to work"
 
 
+def test_ctrl_c_writing_the_answer_does_not_leave_the_app_inert(wired, monkeypatch):
+    """The same hole as `ask()`'s, one method along — and worse.
+
+    `record_checkin` waits on the write lock, a window up to ten seconds
+    wide for a Ctrl-C in the terminal that launched `loop-gui` to land in.
+    `except Exception` does not catch it, so `_busy` sticks `True` and
+    `busy_changed(False)` never fires: since the lockout is wired to that
+    same flag, every action stays greyed out across every later poll and
+    the tray's Quit refuses too. Not "check-ins stop" — "the app is inert
+    and cannot be quit from the tray".
+    """
+    from loop.gui.tray import Tray
+    from loop.gui.window import MainWindow
+
+    clock, writer, controller = wired
+    open_one(writer)
+    clock[0] = 1200.0  # a ping is due
+
+    window = MainWindow(controller, mode="dark")
+    tray = Tray(window, mode="dark")
+    controller.changed.connect(window.bind)
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(commands, "record_checkin", interrupted)
+    scheduler = Scheduler(controller, writer, FakeBlocker([answer(choice="n")]),
+                          now=lambda: clock[0])
+    scheduler.busy_changed.connect(window.set_checkin_active)
+    scheduler.busy_changed.connect(tray.set_checkin_active)
+
+    with pytest.raises(KeyboardInterrupt):
+        scheduler.tick()
+
+    assert scheduler._busy is False, "a stranded guard now bricks the UI, not just check-ins"
+    controller.refresh()          # the 1 Hz poll, the morning after
+    assert window._actions["close"].isEnabled(), "the actions must come back"
+    assert tray._checkin_active is False, "and the tray must be able to quit again"
+
+    # The flag's value is not the claim: prove a later tick still works.
+    monkeypatch.setattr(commands, "record_checkin", lambda *a, **k: True)
+    blocker = FakeBlocker([answer(choice="n")])
+    scheduler._blocker = blocker
+    scheduler.tick()
+    assert len(blocker.prompts) == 1
+    window.close()
+
+
+def test_ctrl_c_scheduling_the_retry_does_not_leave_the_app_inert(wired, monkeypatch):
+    """The third guard-release handler, and the one nobody names: the
+    `QTimer.singleShot` that arms a retry. It has the same shape as the
+    other two and needs the same class — two out of three is how the
+    first pass of this fix went."""
+    from PySide6.QtCore import QTimer
+    from loop.store.lock import LockTimeout
+
+    clock, writer, controller = wired
+    open_one(writer)
+    clock[0] = 1200.0
+
+    def contended(*args, **kwargs):
+        raise LockTimeout("contended")
+
+    def interrupted(ms, fn):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(commands, "record_checkin", contended)
+    monkeypatch.setattr(QTimer, "singleShot", staticmethod(interrupted))
+
+    scheduler = Scheduler(controller, writer, FakeBlocker([answer(choice="n")]),
+                          now=lambda: clock[0])
+    released = []
+    scheduler.busy_changed.connect(released.append)
+
+    with pytest.raises(KeyboardInterrupt):
+        scheduler.tick()
+
+    assert scheduler._busy is False
+    assert released == [True, False], "the lockout must be lifted, not just the flag"
+
+
 def test_the_p100_stop_now_button_actually_stops_the_loop(wired, monkeypatch):
     """The spec's p100 copy change is two halves and only one shipped:
     "it becomes `Choice("x", "stop now")`, **and the scheduler opens the
