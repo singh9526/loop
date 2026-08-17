@@ -15,13 +15,6 @@ def test_format_countdown(remaining, expected):
     assert base.format_countdown(remaining) == expected
 
 
-@pytest.mark.parametrize(
-    "remaining,total,expected",
-    [(300.0, 300.0, 1.0), (150.0, 300.0, 0.5), (0.0, 300.0, 0.0), (-5.0, 300.0, 0.0)],
-)
-def test_remaining_fraction(remaining, total, expected):
-    assert base.remaining_fraction(remaining, total) == expected
-
 
 def test_prompt_defaults_are_usable_without_optional_parts():
     prompt = base.Prompt(

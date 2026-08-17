@@ -1,12 +1,12 @@
 """Direct, isolated tests of `loop.app.checkin.build_prompt` and
 `answers_to_events` — the translation layer, called without going through
-`sched.tick` or the jsonl append path at all.
+a scheduler or the jsonl append path at all.
 
-`tests/sched/test_tick.py` still exercises the same logic end to end
-through `tick()`, including the daemon's own staleness re-check; it is
-left untouched by this task. These tests exist so the GUI's future
-scheduler (Task 14) can be proven against the translation layer without
-dragging in `sched/` or a running daemon.
+`tests/gui/test_scheduler.py` exercises the same logic end to end through
+`Scheduler.tick`, including the staleness re-check `commands.record_checkin`
+now does under the lock. These tests exist so the translation layer — every
+prompt string, and every event an answer becomes — can be proven without
+Qt, and so they still run on a machine with no PySide6 installed.
 """
 
 from __future__ import annotations

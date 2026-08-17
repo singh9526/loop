@@ -126,8 +126,8 @@ def test_answers_for_a_loop_closed_mid_prompt_are_dropped(wired):
 
 def test_a_lock_timeout_recording_shown_does_not_crash_and_shows_nothing(wired, monkeypatch):
     """`LockTimeout` is not a `LoopError`; it propagates straight out of
-    `Writer.mutate` when another process (still, until Task 15, possibly
-    the daemon) holds the lock. A checkpoint tick must swallow it rather
+    `Writer.mutate` when another process (a CLI command in a terminal)
+    holds the lock. A checkpoint tick must swallow it rather
     than let it escape a QTimer callback — and must not show the window,
     since that would answer a checkpoint the log never recorded as shown."""
     from loop.store.lock import LockTimeout

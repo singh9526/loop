@@ -104,9 +104,10 @@ is 75% of the work done?   [y] [c]ut scope [e]xtend estimate
 budget is gone. what now?   [x] stop now  [c]ut scope  [e]xtend estimate
 ```
 
-`c` asks for a new stop condition. `e` asks for a new budget plus *what did you
-learn that made it bigger?* — that answer is what `loop stats` mines for estimate
-drift.
+`x` records the decision and opens the postmortem there and then — the same
+form as Actions ▸ Close Loop…, no terminal needed. `c` asks for a new stop
+condition. `e` asks for a new budget plus *what did you learn that made it
+bigger?* — that answer is what `loop stats` mines for estimate drift.
 
 Timing details:
 

@@ -4,8 +4,8 @@ Nothing here may import from the core package. That is the seam: a new
 platform's check-in is a new file implementing `ask`, and the domain
 logic never learns which one ran. Today that file is `gui/checkin.py`,
 not anything under `loop/blockers/` — this module only defines the
-shared contract (`Prompt`, `Answers`) and the pieces every implementation
-reuses (`format_countdown`, `remaining_fraction`).
+shared contract (`Prompt`, `Answers`) and the one piece an implementation
+reuses, `format_countdown`.
 """
 
 from __future__ import annotations
@@ -59,9 +59,3 @@ class Blocker(Protocol):
 def format_countdown(remaining_s: float) -> str:
     remaining = max(0, int(remaining_s))
     return f"{remaining // 60}:{remaining % 60:02d}"
-
-
-def remaining_fraction(remaining_s: float, total_s: float) -> float:
-    if total_s <= 0:
-        return 0.0
-    return max(0.0, min(1.0, remaining_s / total_s))

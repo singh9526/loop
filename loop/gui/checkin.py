@@ -105,8 +105,8 @@ class CheckinWindow(QWidget):
             # whatever keys the caller passed. The window's own UI cannot
             # reach that — the Submit button only exists while fields are
             # on screen — but `submit_fields` is public, so the door is
-            # shut here rather than in `session.py`, which the CLI
-            # blockers still share until Task 15.
+            # shut here rather than in `session.py`, which stays a
+            # toolkit-free state machine with its own tests.
             return []
         missing = self._session.submit_fields(values)
         self._show_missing(missing)
