@@ -26,7 +26,9 @@ TAIL_BLOCK = 8192
 
 
 class CorruptLogError(Exception):
-    """An interior line of the log could not be parsed."""
+    """An interior line of the log could not be parsed, or the file could
+    not be decoded at all. Both carry `<path>: line N ...`, which
+    `Controller` and `LogbookView` read the number back out of."""
 
 
 def append(event: dict, path: Path | None = None) -> None:
@@ -144,6 +146,12 @@ def _decoded(target: Path) -> str:
     dashboard freezes with no unreadable banner and the check-ins stop
     silently. The line number is recovered from the byte offset so the
     banner points at the damage like it does for unparseable JSON.
+
+    No tolerance for an undecodable *tail*, unlike an unparseable one:
+    `json.dumps` escapes every non-ASCII character (`·` is written
+    `\\u00b7`), so a torn write of ours can only ever leave valid UTF-8.
+    An undecodable byte means damage from outside this program, and the
+    banner is the right answer to that.
     """
     data = target.read_bytes()
     try:
