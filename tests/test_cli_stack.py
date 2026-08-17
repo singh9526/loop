@@ -27,6 +27,23 @@ def state():
 POSTMORTEM = ["it was the cert", "tls handshake reset", "openssl s_client"]
 
 
+# --- require_app gates `resume` too, at its own call site in cmd_resume ---
+
+
+def test_resume_refuses_when_the_app_is_not_available(feed, monkeypatch, capsys):
+    """A paused loop exists — a real resume would otherwise succeed — so a
+    refusal here can only come from `require_app()`, not from having
+    nothing to resume."""
+    open_loop(feed, "staging deploy fails")
+    feed(["prod incident"])
+    cli.main(["pause"])
+
+    monkeypatch.setattr("loop.app.launcher.available", lambda: False)
+    assert cli.main(["resume"]) == 1
+    assert "the loop app is not installed" in capsys.readouterr().err
+    assert state().active_id is None
+
+
 def test_pause_requires_a_reason_and_clears_active(feed):
     open_loop(feed, "staging deploy fails")
     feed(["prod incident"])

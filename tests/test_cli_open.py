@@ -19,6 +19,22 @@ def log():
     return jsonl.read_all()
 
 
+# --- require_app must actually gate `loop open`, not just exist ---
+#
+# Every fixture in this file patches `launcher.available` to True so the
+# rest of the suite can run without PySide6 installed. That leaves the
+# gate itself uncovered: deleting the `require_app()` call in `cmd_open`
+# would pass every other test here. This one flips the patch back to
+# False for itself and drives the real refusal.
+
+
+def test_open_refuses_when_the_app_is_not_available(monkeypatch, capsys):
+    monkeypatch.setattr("loop.app.launcher.available", lambda: False)
+    assert cli.main(["open", "q"]) == 1
+    assert "the loop app is not installed" in capsys.readouterr().err
+    assert log() == []
+
+
 def test_open_writes_a_loop_opened_event(feed, capsys):
     feed(["comes up clean twice", "45m", "cert expiry", "pg pool", ""])
     assert cli.main(["open", "staging deploy fails at startup"]) == 0
