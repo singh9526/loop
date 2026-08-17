@@ -79,6 +79,31 @@ def test_ensure_running_spawns_the_gui_module(monkeypatch):
     assert kwargs["stderr"] is subprocess.DEVNULL
 
 
+def test_ensure_running_uses_creation_flags_not_start_new_session_on_windows(monkeypatch):
+    """`start_new_session` is a POSIX-only Popen kwarg (it calls
+    `setsid()`); Windows detaches a spawned process via `creationflags`
+    instead. This machine's `subprocess` module does not define the
+    Windows constants at all (confirmed: `hasattr(subprocess,
+    'DETACHED_PROCESS')` is False on macOS), so the branch is simulated
+    by adding them rather than by finding them already there."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(subprocess, "DETACHED_PROCESS", 0x00000008, raising=False)
+    monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, raising=False)
+    calls = []
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: calls.append((argv, kwargs)))
+
+    launcher.ensure_running()
+
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == [sys.executable, "-m", "loop.gui"]
+    assert "start_new_session" not in kwargs
+    assert kwargs["creationflags"] == 0x00000008 | 0x00000200
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stdout"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.DEVNULL
+
+
 def test_ensure_running_is_unconditional_not_deduplicated(monkeypatch):
     """Unlike `sched.daemon.ensure_running`, this never checks liveness
     itself — the socket handshake in the spawned process is what decides
