@@ -33,5 +33,5 @@ def events_path() -> Path:
     return loop_home() / "events.jsonl"
 
 
-def pid_path() -> Path:
-    return loop_home() / "daemon.pid"
+def lock_path() -> Path:
+    return loop_home() / "lock"

@@ -2,9 +2,9 @@
 
 ## What it does
 
-Opens a debugging loop. Starts a timer. Spawns a background daemon that interrupts
-you with a full-screen overlay at fixed points to ask whether you are making
-progress.
+Opens a debugging loop. Starts a timer. Launches the desktop app (if it is not
+already running), which interrupts you with a full-screen check-in at fixed
+points to ask whether you are making progress.
 
 The point: you cannot tell you are thrashing from inside the thrash. The tool asks
 from outside.
@@ -79,7 +79,7 @@ Stop condition and hypotheses have no flags. They are always interactive.
 
 ## What happens after
 
-The daemon polls every 10 seconds. There are three interrupt types, all measured on
+The app polls every 10 seconds. There are three interrupt types, all measured on
 **active** elapsed time — a loop that sat paused overnight has not been running for
 eight hours.
 
@@ -104,13 +104,14 @@ is 75% of the work done?   [y] [c]ut scope [e]xtend estimate
 budget is gone. what now?   [x] stop now  [c]ut scope  [e]xtend estimate
 ```
 
-`c` asks for a new stop condition. `e` asks for a new budget plus *what did you
-learn that made it bigger?* — that answer is what `loop stats` mines for estimate
-drift.
+`x` records the decision and opens the postmortem there and then — the same
+form as Actions ▸ Close Loop…, no terminal needed. `c` asks for a new stop
+condition. `e` asks for a new budget plus *what did you learn that made it
+bigger?* — that answer is what `loop stats` mines for estimate drift.
 
 Timing details:
 
-- Overlay times out at 300s, force-killed at 310s.
+- Overlay times out at 300s.
 - An unanswered checkpoint re-fires after 10 minutes.
 - Pings are suppressed within 3 minutes of a checkpoint so the two never collide.
 - Once p100 is reached, p75 is moot — only the highest passed boundary is live.
@@ -166,20 +167,22 @@ Other commands: `ls` (the stack), `pause` / `resume`, `abandon`, `grep <term>`
 
 ## Safe practice run
 
-The real overlay takes your whole screen for up to 5 minutes. To learn the CLI
-without that:
+`LOOP_HOME` keeps a practice run's events out of your real data directory:
 
 ```bash
-LOOP_HOME=/tmp/looptut LOOP_BLOCKER=fake loop open "test"
+LOOP_HOME=/tmp/looptut loop open "test"
 ```
 
-`LOOP_BLOCKER=fake` auto-answers instead of drawing an overlay. `LOOP_HOME` keeps
-the events out of your real data directory.
+There is no headless bypass from the CLI anymore — `loop open` requires the
+desktop app (`pip install 'loop-tool[gui]'`) and it will draw the real
+full-screen check-in when a ping or checkpoint comes due. Use a short
+`--interval` and `--budget` to keep a practice run brief rather than trying
+to avoid the window.
 
-Cleaning up: kill the daemon **before** deleting the directory, or it recreates it.
+Cleaning up: quit the app (tray/menu-bar icon → Quit) before deleting the
+directory — there is no daemon or pidfile to kill by hand.
 
 ```bash
-kill $(python3 -c 'import json; print(json.load(open("/tmp/looptut/daemon.pid"))["pid"])')
 rm -rf /tmp/looptut
 ```
 
@@ -196,6 +199,6 @@ appends one event; all state is a fold over that log. Two events from a real run
 Environment overrides:
 
 - `LOOP_HOME` — data directory.
-- `LOOP_BLOCKER` — `tk` | `macos` | `fake`. Defaults to the best available for the
-  platform; `loop open` fails loudly at startup if none can be constructed, rather
-  than arming a timer nothing can surface.
+
+`loop open` / `loop resume` fail loudly at startup if the desktop app is not
+installed, rather than arming a timer nothing can ever surface a check-in for.

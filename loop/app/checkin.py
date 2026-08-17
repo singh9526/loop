@@ -1,19 +1,16 @@
-"""One scheduler tick: ask core what is due, render it, write the answer down.
+"""Prompts out, events in.
 
-This is one of only two places (with `cli.py`) that is allowed to touch
-core, blockers, and the store in the same breath.
+The translation between what a check-in shows and what the log records.
+Speaks only `core` and `blockers.base` — no store, no scheduler, no Qt —
+which is what lets it be tested, and reused, without either.
 """
 
 from __future__ import annotations
 
-import time
-
-from loop.blockers.base import Answers, Blocker, Choice, Prompt, TextField
-from loop.blockers.factory import get_blocker
+from loop.blockers.base import Answers, Choice, Prompt, TextField
 from loop.core import events, schedule, thrash
 from loop.core.models import Loop, State
 from loop.core.timefmt import format_duration, parse_duration
-from loop.store import jsonl
 
 CUT_FIELDS = [TextField("new_stop_condition", "new stop condition")]
 EXTEND_FIELDS = [
@@ -66,7 +63,14 @@ def build_prompt(state: State, loop: Loop, due: schedule.Due) -> Prompt:
         title=f"budget gone · {span}",
         question="budget is gone. what now?",
         choices=[
-            Choice("x", "stop now — then run `loop close`"),
+            # Was "stop now — then run `loop close`". Pointing at a
+            # terminal the user has been told they no longer need is a
+            # dangling instruction — so the app does it instead:
+            # `gui/scheduler.py` opens the postmortem once this answer's
+            # `checkpoint_answered` is written (`Scheduler.postmortem`).
+            # The CLI still expects `loop close` next; the string is no
+            # longer the place that says so.
+            Choice("x", "stop now"),
             Choice("c", "cut scope"),
             Choice("e", "extend estimate"),
         ],
@@ -142,31 +146,3 @@ def _answered(loop: Loop, due: schedule.Due, now: float, *, decision: str, on_tr
         events.make("checkpoint_answered", ts=now, loop_id=loop.id,
                     kind=due.kind, on_track=on_track, decision=decision)
     ]
-
-
-def tick(now: float | None = None, blocker: Blocker | None = None) -> schedule.Due | None:
-    at = time.time() if now is None else now
-    state = events.fold(jsonl.read_all())
-
-    due = schedule.next_due(state, at)
-    if due is None:
-        return None
-
-    loop = state.loops[due.loop_id]
-    prompt = build_prompt(state, loop, due)
-
-    if due.kind != "ping":
-        jsonl.append(events.make("checkpoint_shown", ts=at, loop_id=loop.id, kind=due.kind))
-
-    answers = (blocker or get_blocker()).ask(prompt)
-
-    # A blocking prompt can sit for minutes. If the loop it was built for
-    # was closed, abandoned, or paused from elsewhere while it was up, the
-    # answers are stale — discard them and let this tick be a quiet one,
-    # exactly like a tick that found nothing due.
-    if events.fold(jsonl.read_all()).active_id != due.loop_id:
-        return None
-
-    for event in answers_to_events(loop, due, answers, time.time() if now is None else now):
-        jsonl.append(event)
-    return due

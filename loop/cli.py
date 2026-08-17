@@ -8,12 +8,13 @@ import sys
 import time
 
 from loop import prompts, render
-from loop.blockers.factory import BlockerUnavailable, get_blocker
+from loop.app import commands, launcher
+from loop.app.errors import LoopError  # noqa: F401  (re-exported; callers import it from here)
+from loop.app.writer import Writer
 from loop.core import events
-from loop.core.models import MAX_STACK_DEPTH, PAUSED, WARN_STACK_DEPTH, State
+from loop.core.models import MAX_STACK_DEPTH, WARN_STACK_DEPTH, State
 from loop.core.timefmt import format_duration
-from loop.sched import daemon
-from loop.store import jsonl
+from loop.store import jsonl, lock
 
 DEFAULT_BUDGET_S = 2700.0
 DEFAULT_INTERVAL_S = 1200.0
@@ -34,35 +35,31 @@ def say(message: str) -> None:
         print(message)
 
 
-class LoopError(Exception):
-    """A user-facing error. Printed to stderr; exit code 1."""
-
-
 def load_state() -> State:
+    """The display read. Every write goes through `Writer.mutate`, which
+    re-reads under the lock; this state is only ever advisory."""
     return events.fold(jsonl.read_all())
 
 
-def emit(event: dict) -> None:
-    jsonl.append(event)
+def require_active(state: State) -> None:
+    """Advisory copy of the check every mutating command makes under the lock.
 
-
-def require_active(state: State):
-    loop = state.active_loop()
-    if loop is None:
+    Same reason as the two copies in `cmd_open`: a command that would refuse
+    must refuse *before* it asks the user three questions. The copy inside
+    `commands` is the authority — only it sees the state being written to.
+    """
+    if state.active_loop() is None:
         raise LoopError("no active loop. run `loop open \"<question>\"` first.")
-    return loop
 
 
-def require_blocker() -> None:
+def require_app() -> None:
     """Fail loudly, before any event is written, if nothing can show a check-in.
 
-    `loop open`/`loop resume` must never leave a timer running that the
-    daemon can never surface a prompt for.
+    `loop open` / `loop resume` must never leave a timer running that
+    nothing will ever interrupt.
     """
-    try:
-        get_blocker()
-    except BlockerUnavailable as exc:
-        raise LoopError(str(exc)) from exc
+    if not launcher.available():
+        raise LoopError(launcher.UNAVAILABLE_MESSAGE)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -100,8 +97,6 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("close", help="close the active loop with a postmortem", parents=[common])
     subparsers.add_parser("abandon", help="abandon the active loop", parents=[common])
 
-    subparsers.add_parser("tick", help="internal: run one scheduler tick", parents=[common])
-
     subparsers.add_parser("stats", help="the logbook", parents=[common])
     grepper = subparsers.add_parser(
         "grep", help="search closed and abandoned loops", parents=[common]
@@ -113,10 +108,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_open(args, state: State, now: float) -> dict:
-    require_blocker()
+    require_app()
 
+    # Advisory copies of two checks open_loop makes under the lock. They run
+    # here so a refusal costs four keystrokes, not forty. The copies inside
+    # open_loop are the authority — only they see the state being written to.
     active = state.active_loop()
-    parent_id = active.id if active is not None else None
     if active is not None:
         depth = events.stack_depth(state)
         if depth >= MAX_STACK_DEPTH:
@@ -139,68 +136,46 @@ def cmd_open(args, state: State, now: float) -> dict:
     interval_s = prompts.parse_duration(args.interval) if args.interval else DEFAULT_INTERVAL_S
     hypotheses = prompts.ask_lines("hypotheses?", minimum=1)
 
-    if active is not None:
-        emit(events.make("loop_paused", ts=now, loop_id=active.id, reason=args.question))
-        say(f"  #{active.id} paused at "
-            f"{format_duration(active.elapsed(now))} active.")
-        state = load_state()
-
-    event = events.make(
-        "loop_opened",
-        ts=now,
-        loop_id=events.next_loop_id(state),
+    result = commands.open_loop(
+        Writer(now=lambda: now),
         question=args.question,
         stop_condition=stop_condition,
         budget_s=budget_s,
         interval_s=interval_s,
         hypotheses=hypotheses,
-        parent_id=parent_id,
+        stack_on_active=True,
     )
-    emit(event)
 
-    depth = events.stack_depth(load_state())
-    say(f"  #{event['loop_id']} open. timer running. "
-        f"{len(hypotheses)} hypotheses live.")
-    if depth > 1:
-        say(f"  stack depth {depth}.")
-    if depth >= WARN_STACK_DEPTH:
+    if result.paused_id is not None:
+        say(f"  #{result.paused_id} paused at "
+            f"{format_duration(result.paused_elapsed_s)} active.")
+    say(f"  #{result.loop_id} open. timer running. "
+        f"{result.hypotheses} hypotheses live.")
+    if result.depth > 1:
+        say(f"  stack depth {result.depth}.")
+    if result.depth >= WARN_STACK_DEPTH:
         say("  ⚠  you are context switching, not working.")
-    daemon.ensure_running()
-    return event
+    launcher.ensure_running()
+    return result.event
 
 
 def cmd_try(args, state: State, now: float) -> dict:
-    loop = require_active(state)
-    event = events.make(
-        "action_logged", ts=now, loop_id=loop.id, action=args.action, because=args.because
+    result = commands.log_action(
+        Writer(now=lambda: now), action=args.action, because=args.because
     )
-    emit(event)
-    say(f"  logged. {loop.actions + 1} actions this loop.")
-    return event
+    say(f"  logged. {result.actions} actions this loop.")
+    return result.event
 
 
 def cmd_hyp(args, state: State, now: float) -> dict:
-    loop = require_active(state)
     if args.hyp_command == "add":
-        event = events.make(
-            "hypothesis_added",
-            ts=now,
-            loop_id=loop.id,
-            hyp_id=events.next_hypothesis_id(loop),
-            text=args.text,
-        )
-        emit(event)
-        say(f"  hypothesis {event['hyp_id']} added. "
-            f"{len(loop.live_hypotheses()) + 1} live.")
-        return event
+        result = commands.add_hypothesis(Writer(now=lambda: now), text=args.text)
+        say(f"  hypothesis {result.hyp_id} added. {result.live} live.")
+        return result.event
 
-    if not any(h.id == args.hyp_id and h.alive for h in loop.hypotheses):
-        raise LoopError(f"no live hypothesis {args.hyp_id}.")
-    event = events.make("hypothesis_eliminated", ts=now, loop_id=loop.id, hyp_id=args.hyp_id)
-    emit(event)
-    say(f"  hypothesis {args.hyp_id} ruled out. "
-        f"{len(loop.live_hypotheses()) - 1} live.")
-    return event
+    result = commands.kill_hypothesis(Writer(now=lambda: now), hyp_id=args.hyp_id)
+    say(f"  hypothesis {result.hyp_id} ruled out. {result.live} live.")
+    return result.event
 
 
 def cmd_status(args, state: State, now: float) -> dict:
@@ -211,97 +186,63 @@ def cmd_status(args, state: State, now: float) -> dict:
 
 
 def cmd_pause(args, state: State, now: float) -> dict:
-    loop = require_active(state)
+    require_active(state)
     reason = args.reason or prompts.ask_text("what interrupted?")
-    event = events.make("loop_paused", ts=now, loop_id=loop.id, reason=reason)
-    emit(event)
-    say(f"  #{loop.id} paused at {format_duration(loop.elapsed(now))} active.")
-    return event
+    result = commands.pause(Writer(now=lambda: now), reason=reason)
+    say(f"  #{result.loop_id} paused at {format_duration(result.elapsed_s)} active.")
+    return result.event
 
 
 def cmd_resume(args, state: State, now: float) -> dict:
-    require_blocker()
+    require_app()
 
-    target = _resume_target(args, state)
-
+    # Asked here, before the write, because `resume` needs the answer and
+    # only the terminal can collect it. `args.loop_id` may be None, in which
+    # case the comparison is against None and the reason is asked — matching
+    # today, where the prompt fires whenever an active loop exists and is
+    # not the target.
     active = state.active_loop()
-    if active is not None:
-        if active.id == target.id:
-            raise LoopError(f"#{target.id} is already active.")
-        reason = prompts.ask_text("what interrupted?")
-        emit(events.make("loop_paused", ts=now, loop_id=active.id, reason=reason))
-
-    event = events.make("loop_resumed", ts=now, loop_id=target.id)
-    emit(event)
-    _say_resumed(target, now)
-    daemon.ensure_running()
-    return event
-
-
-def _resume_target(args, state: State):
-    if args.loop_id is None:
-        paused = state.paused_loops()
-        if not paused:
-            raise LoopError("nothing to resume.")
-        return paused[0]
-
-    target = state.loops.get(args.loop_id)
-    if target is None:
-        raise LoopError(f"no loop #{args.loop_id}.")
-    if target.status != PAUSED:
-        raise LoopError(f"#{args.loop_id} is {target.status}, not paused.")
-    return target
+    pause_reason = (
+        prompts.ask_text("what interrupted?")
+        if active is not None and active.id != args.loop_id
+        else None
+    )
+    result = commands.resume(
+        Writer(now=lambda: now), loop_id=args.loop_id, pause_reason=pause_reason
+    )
+    _say_resumed(result.summary)
+    launcher.ensure_running()
+    return result.event
 
 
-def _say_resumed(loop, now: float) -> None:
+def _say_resumed(summary) -> None:
     """The resumed-status line, shared by `resume` and the close/abandon pop."""
-    say(f"  → resumed #{loop.id} · "
-        f"{format_duration(loop.elapsed(now))} / {format_duration(loop.budget_s)} · "
-        f"next ping {format_duration(loop.interval_s)}")
-
-
-def pop_to_parent(state: State, loop, now: float) -> int | None:
-    """Resume the parent if it is still paused. Returns the resumed loop id."""
-    if loop.parent_id is None:
-        return None
-    parent = state.loops.get(loop.parent_id)
-    if parent is None or parent.status != PAUSED:
-        return None
-    emit(events.make("loop_resumed", ts=now, loop_id=parent.id))
-    return parent.id
+    say(f"  → resumed #{summary.loop_id} · "
+        f"{format_duration(summary.elapsed_s)} / {format_duration(summary.budget_s)} · "
+        f"next ping {format_duration(summary.interval_s)}")
 
 
 def cmd_close(args, state: State, now: float) -> dict:
-    loop = require_active(state)
-    event = events.make(
-        "loop_closed",
-        ts=now,
-        loop_id=loop.id,
+    require_active(state)
+    result = commands.close(
+        Writer(now=lambda: now),
         what_was_it=prompts.ask_text("what was it?"),
         giveaway=prompts.ask_text("what was the giveaway?"),
         five_min_path=prompts.ask_text("how could I have found it in 5 minutes?"),
     )
-    emit(event)
-    say(f"  closed #{loop.id}. {format_duration(loop.elapsed(now))}. "
-        f"{loop.eliminated} hypotheses ruled out. pattern saved.")
-    _report_pop(load_state(), loop, now)
-    return event
+    say(f"  closed #{result.loop_id}. {format_duration(result.elapsed_s)}. "
+        f"{result.eliminated} hypotheses ruled out. pattern saved.")
+    if result.resumed is not None:
+        _say_resumed(result.resumed)
+    return result.event
 
 
 def cmd_abandon(args, state: State, now: float) -> dict:
-    loop = require_active(state)
-    event = events.make("loop_abandoned", ts=now, loop_id=loop.id)
-    emit(event)
-    say(f"  abandoned #{loop.id} at {format_duration(loop.elapsed(now))} active.")
-    _report_pop(load_state(), loop, now)
-    return event
-
-
-def _report_pop(state: State, loop, now: float) -> None:
-    resumed_id = pop_to_parent(state, loop, now)
-    if resumed_id is None:
-        return
-    _say_resumed(state.loops[resumed_id], now)
+    result = commands.abandon(Writer(now=lambda: now))
+    say(f"  abandoned #{result.loop_id} at {format_duration(result.elapsed_s)} active.")
+    if result.resumed is not None:
+        _say_resumed(result.resumed)
+    return result.event
 
 
 def cmd_ls(args, state: State, now: float) -> dict:
@@ -311,13 +252,6 @@ def cmd_ls(args, state: State, now: float) -> dict:
         "active_id": state.active_id,
         "paused_ids": [lp.id for lp in state.paused_loops()],
     }
-
-
-def cmd_tick(args, state: State, now: float) -> dict:
-    from loop.sched.tick import tick
-
-    due = tick(now=None)
-    return {"fired": None if due is None else due.kind}
 
 
 def cmd_stats(args, state: State, now: float) -> dict:
@@ -330,39 +264,26 @@ def cmd_stats(args, state: State, now: float) -> dict:
 
 
 def cmd_grep(args, state: State, now: float) -> dict:
-    from loop.core.models import ABANDONED, CLOSED
+    from loop.core import search
 
-    term = args.term.lower()
     log = jsonl.read_all()  # read once; re-reading per loop was O(loops * log)
-    matches: list[dict] = []
-
-    for loop in state.loops.values():
-        if loop.status not in (CLOSED, ABANDONED):
-            continue
-        hits = [
-            (label, text)
-            for label, text in (loop.postmortem or {}).items()
-            if term in text.lower()
-        ]
-        hits += [
-            ("action", f"{event['action']} — because {event['because']}")
-            for event in log
-            if event["type"] == "action_logged"
-            and event["loop_id"] == loop.id
-            and (term in event["action"].lower() or term in event["because"].lower())
-        ]
-        if hits:
-            matches.append({"loop_id": loop.id, "question": loop.question, "hits": hits})
+    matches = search.find(state, log, args.term)
 
     if not matches:
         say(f"  no matches for {args.term!r}.")
         return {"matches": []}
 
+    result: list[dict] = []
     for match in matches:
-        say(f"  #{match['loop_id']}  {match['question']}")
-        for label, text in match["hits"]:
-            say(f"      {label}: {text}")
-    return {"matches": matches}
+        say(f"  #{match.loop_id}  {match.question}")
+        for hit in match.hits:
+            say(f"      {hit.label}: {hit.text}")
+        result.append({
+            "loop_id": match.loop_id,
+            "question": match.question,
+            "hits": [(hit.label, hit.text) for hit in match.hits],
+        })
+    return {"matches": result}
 
 
 COMMANDS = {
@@ -375,7 +296,6 @@ COMMANDS = {
     "close": cmd_close,
     "abandon": cmd_abandon,
     "status": cmd_status,
-    "tick": cmd_tick,
     "stats": cmd_stats,
     "grep": cmd_grep,
 }
@@ -385,10 +305,22 @@ def main(argv: list[str] | None = None) -> int:
     global _QUIET
     args = build_parser().parse_args(argv)
     _QUIET = args.json
+    # One clock reading per invocation, threaded into every command's Writer
+    # as `Writer(now=lambda: now)`. A CLI command is a single instant from
+    # the user's point of view, and the minutes they spend answering
+    # `close`'s postmortem prompts are not minutes the loop was running: a
+    # Writer left on its own `time.time` would stamp `loop_closed` at the
+    # moment of the last answer, inflating `closed_at`, elapsed-at-close, and
+    # every estimate-drift figure derived from them.
     now = time.time()
     try:
         result = COMMANDS[args.command](args, load_state(), now)
     except (LoopError, prompts.Aborted) as exc:
+        print(f"  {exc}", file=sys.stderr)
+        return 1
+    except lock.LockTimeout as exc:
+        # Not a LoopError: it is raised by the store, under Writer.mutate,
+        # and would otherwise reach the user as a traceback.
         print(f"  {exc}", file=sys.stderr)
         return 1
     except jsonl.CorruptLogError as exc:

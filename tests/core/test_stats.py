@@ -163,3 +163,31 @@ def test_render_produces_the_documented_lines():
         "estimate drift", "ping response", "interruptions",
     ):
         assert label in joined
+
+
+def test_over_budget_drift_reads_over():
+    assert stats.format_drift(18.4) == "18.4% over"
+
+
+def test_under_budget_drift_reads_under_not_negative_over():
+    """A loop that finished early is good news and must not read as -99.7% over."""
+    assert stats.format_drift(-99.7) == "99.7% under"
+
+
+def test_exactly_on_budget_reads_over_with_zero():
+    assert stats.format_drift(0.0) == "0.0% over"
+
+
+def test_the_rendered_report_uses_the_helper(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOP_HOME", str(tmp_path))
+    report = {
+        "followed": {"count": 0, "median_s": 0.0, "resolved_pct": 0.0},
+        "abandoned": {"count": 0, "median_s": 0.0, "resolved_pct": 0.0},
+        "thrash_episodes": {"total": 0},
+        "estimate_drift": {"median_pct": -20.0, "extensions": 0, "loops_with_extensions": 0},
+        "ping_response": {"answered": 0, "timed_out": 0},
+        "interruptions": {"median_pauses": 0.0, "median_pause_s": 0.0, "max_depth": 0},
+    }
+    drift_line = next(line for line in stats.render(report) if "estimate drift" in line)
+    assert "20.0% under budget" in drift_line
+    assert "-20.0" not in drift_line

@@ -8,7 +8,8 @@ from loop.store import jsonl
 @pytest.fixture(autouse=True)
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOP_HOME", str(tmp_path))
-    monkeypatch.setattr("loop.sched.daemon.ensure_running", lambda: None)
+    monkeypatch.setattr("loop.app.launcher.ensure_running", lambda: None)
+    monkeypatch.setattr("loop.app.launcher.available", lambda: True)
 
 
 def seed_closed_loop():

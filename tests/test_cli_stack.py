@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from loop import cli
@@ -8,8 +10,8 @@ from loop.store import jsonl
 @pytest.fixture(autouse=True)
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOP_HOME", str(tmp_path))
-    monkeypatch.setenv("LOOP_BLOCKER", "fake")
-    monkeypatch.setattr("loop.sched.daemon.ensure_running", lambda: None)
+    monkeypatch.setattr("loop.app.launcher.ensure_running", lambda: None)
+    monkeypatch.setattr("loop.app.launcher.available", lambda: True)
 
 
 def open_loop(feed, question, stack=False):
@@ -23,6 +25,23 @@ def state():
 
 
 POSTMORTEM = ["it was the cert", "tls handshake reset", "openssl s_client"]
+
+
+# --- require_app gates `resume` too, at its own call site in cmd_resume ---
+
+
+def test_resume_refuses_when_the_app_is_not_available(feed, monkeypatch, capsys):
+    """A paused loop exists — a real resume would otherwise succeed — so a
+    refusal here can only come from `require_app()`, not from having
+    nothing to resume."""
+    open_loop(feed, "staging deploy fails")
+    feed(["prod incident"])
+    cli.main(["pause"])
+
+    monkeypatch.setattr("loop.app.launcher.available", lambda: False)
+    assert cli.main(["resume"]) == 1
+    assert "the loop app is not installed" in capsys.readouterr().err
+    assert state().active_id is None
 
 
 def test_pause_requires_a_reason_and_clears_active(feed):
@@ -196,3 +215,80 @@ def test_ls_shows_the_stack(feed, capsys):
 def test_ls_on_an_empty_stack(capsys):
     assert cli.main(["ls"]) == 0
     assert "stack is empty" in capsys.readouterr().out
+
+
+# --- a CLI invocation is a single instant ---
+#
+# `main` samples the clock once, at entry, and threads that reading into
+# every command's `Writer`. These two tests advance the clock *while the
+# user is answering*, which a test that freezes the clock to one constant
+# cannot do — and which is the only way to tell an invocation-time stamp
+# apart from a write-time one.
+
+
+class _Clock:
+    """A clock that moves only when the test moves it."""
+
+    def __init__(self, now: float) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_close_stamps_the_invocation_not_the_moment_the_answers_finished(
+    feed, monkeypatch
+):
+    """Minutes spent answering the postmortem are not minutes of debugging.
+
+    A `Writer` left on its own `time.time` would stamp `loop_closed` when
+    the write happens — after the three prompts — pushing `closed_at` past
+    the moment the user actually stopped, and inflating every stats figure
+    derived from it.
+    """
+    clock = _Clock(3_000.0)
+    monkeypatch.setattr(time, "time", clock)
+    open_loop(feed, "staging deploy fails")
+
+    # The user takes 90 seconds over the three postmortem questions.
+    answers = iter(POSTMORTEM)
+
+    def slow_answer(_prompt=""):
+        clock.now += 30.0
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", slow_answer)
+
+    assert cli.main(["close"]) == 0
+    assert clock.now == 3_090.0, "the typing has to actually take time"
+
+    closed = jsonl.read_all()[-1]
+    assert closed["type"] == "loop_closed"
+    assert closed["ts"] == 3_000.0
+    assert state().loops[1].closed_at == 3_000.0
+
+
+def test_open_stamps_the_invocation_so_answering_counts_against_the_budget(
+    monkeypatch,
+):
+    """The budget starts burning when you run the command, not when you
+    finish describing the problem."""
+    clock = _Clock(5_000.0)
+    monkeypatch.setattr(time, "time", clock)
+
+    answers = iter(["stop cond", "45m", "a hypothesis", ""])
+
+    def slow_answer(_prompt=""):
+        clock.now += 15.0
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", slow_answer)
+
+    assert cli.main(["open", "staging deploy fails"]) == 0
+    assert clock.now == 5_060.0, "the typing has to actually take time"
+
+    opened = jsonl.read_all()[0]
+    assert opened["type"] == "loop_opened"
+    assert opened["ts"] == 5_000.0
+    # the minute spent answering is already on the loop's clock
+    assert state().loops[1].elapsed(clock.now) == 60.0

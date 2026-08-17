@@ -29,7 +29,28 @@ def test_linux_default_respects_xdg(tmp_path, monkeypatch):
     assert paths.loop_home() == tmp_path / "xdg" / "loop"
 
 
-def test_events_and_pid_live_under_home(tmp_path, monkeypatch):
+def test_windows_default_uses_appdata(tmp_path, monkeypatch):
+    """No test exercised this branch before Task 17 — `sys.platform ==
+    "win32"` was reachable only on a real Windows machine, and the darwin/
+    linux branches were the only ones simulated."""
+    monkeypatch.delenv("LOOP_HOME", raising=False)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    monkeypatch.setattr(paths.sys, "platform", "win32")
+    assert paths.loop_home() == tmp_path / "Roaming" / "loop"
+
+
+def test_windows_without_appdata_falls_back_to_the_profile(tmp_path, monkeypatch):
+    """`APPDATA` is set by the OS on every real Windows session, but a
+    stripped-down environment (a service, a container, a test) might not
+    have it — the fallback must still land somewhere sane."""
+    monkeypatch.delenv("LOOP_HOME", raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.setattr(paths.sys, "platform", "win32")
+    monkeypatch.setattr(paths.Path, "home", classmethod(lambda cls: tmp_path))
+    assert paths.loop_home() == tmp_path / "AppData" / "Roaming" / "loop"
+
+
+def test_events_and_lock_live_under_home(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOP_HOME", str(tmp_path))
     assert paths.events_path() == tmp_path / "events.jsonl"
-    assert paths.pid_path() == tmp_path / "daemon.pid"
+    assert paths.lock_path() == tmp_path / "lock"

@@ -94,6 +94,15 @@ def _interruptions(terminal: list, max_depth: int) -> dict:
     }
 
 
+def format_drift(median_pct: float) -> str:
+    """Signed drift as a word.
+
+    `median_pct` is signed, so rendering it into a fixed "over budget"
+    suffix makes a loop that finished early read as -99.7% over.
+    """
+    return f"{abs(median_pct)}% {'under' if median_pct < 0 else 'over'}"
+
+
 def render(report: dict) -> list[str]:
     def bucket_line(label: str, data: dict) -> str:
         return (
@@ -109,7 +118,7 @@ def render(report: dict) -> list[str]:
         bucket_line("protocol followed", report["followed"]),
         bucket_line("protocol abandoned", report["abandoned"]),
         f"  {'thrash episodes':<20}: {report['thrash_episodes']['total']}",
-        f"  {'estimate drift':<20}: median {drift['median_pct']}% over budget | "
+        f"  {'estimate drift':<20}: median {format_drift(drift['median_pct'])} budget | "
         f"{drift['extensions']} extensions across {drift['loops_with_extensions']} loops",
         f"  {'ping response':<20}: {report['ping_response']['answered']} answered, "
         f"{report['ping_response']['timed_out']} timed out",
