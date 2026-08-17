@@ -66,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     controller.start()
 
     scheduler = Scheduler(controller, writer, QtBlocker(mode))
+    scheduler.report.connect(window.show_report)
     scheduler.start()
 
     server.newConnection.connect(lambda: _surface(server, window))

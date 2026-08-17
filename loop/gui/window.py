@@ -165,6 +165,15 @@ class MainWindow(QMainWindow):
         style.unpolish(self._clock)
         style.polish(self._clock)
 
+    def show_report(self, kind: str, text: str) -> None:
+        """The public seam for anything outside this window that needs to
+        surface a message the same way `Actions.report` does — the
+        scheduler's `report` signal (an answer that survived every retry
+        but still could not be written), for one. Kept separate from
+        `_on_report` so the rendering logic — styled `#muted` vs `#over` —
+        has exactly one owner regardless of who is reporting."""
+        self._on_report(kind, text)
+
     def _on_report(self, kind: str, text: str) -> None:
         """`Actions.report` lands here. `"stale"` reads as `#muted` — the
         outcome the user wanted already happened, so it is not styled as a

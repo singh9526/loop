@@ -4,6 +4,7 @@ from loop.app import commands
 from loop.app.writer import Writer
 from loop.blockers.base import Answers
 from loop.blockers.fake import FakeBlocker
+from loop.gui import scheduler as scheduler_module
 from loop.gui.controller import Controller
 from loop.gui.scheduler import Scheduler
 from loop.store import jsonl
@@ -160,9 +161,13 @@ def test_a_real_checkin_window_runs_end_to_end_offscreen(wired, monkeypatch):
     assert log()[-1]["type"] == "ping_unanswered"
 
 
-def test_a_lock_timeout_recording_the_answer_drops_it_without_crashing(wired, monkeypatch):
-    """Same guard on the write side: the user answered, but the write lost
-    the race for the lock. The answer is lost, not a crash."""
+def test_a_lock_timeout_recording_the_answer_does_not_crash_and_defers_the_write(wired, monkeypatch):
+    """The user answered, but the first write lost the race for the lock.
+    Unlike the checkpoint-shown case above (nothing to lose yet), there is
+    a real answer in hand here — `tick()` must not raise, and must not
+    drop it on this first failure: the retry is merely scheduled (through
+    `QTimer.singleShot`, never fired synchronously), so nothing is written
+    *yet*, but nothing has been given up on either."""
     from loop.store.lock import LockTimeout
 
     clock, writer, controller = wired
@@ -177,4 +182,107 @@ def test_a_lock_timeout_recording_the_answer_drops_it_without_crashing(wired, mo
     scheduler = Scheduler(controller, writer, blocker, now=lambda: clock[0])
     scheduler.tick()  # must not raise
     assert blocker.prompts[0].kind == "ping"
+    # Not written yet — the retry is only scheduled, not run synchronously.
     assert all(e["type"] != "ping_answered" for e in log())
+
+
+def test_a_transient_lock_timeout_retries_and_the_answer_survives(wired, monkeypatch):
+    """The crux of the fix: a `LockTimeout` on `record_checkin` must not
+    be a permanent loss of an answer the user already gave. Driven
+    deterministically — no real waiting — by making `QTimer.singleShot`
+    invoke its callback immediately, which is exactly what advancing the
+    clock by `RECORD_RETRY_MS` would eventually do for real."""
+    from PySide6.QtCore import QTimer
+    from loop.store.lock import LockTimeout
+
+    monkeypatch.setattr(QTimer, "singleShot", staticmethod(lambda ms, fn: fn()))
+
+    clock, writer, controller = wired
+    open_one(writer)
+    clock[0] = 1200.0  # a ping is due
+
+    real_record_checkin = commands.record_checkin
+    calls = {"n": 0}
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise LockTimeout("contended")
+        return real_record_checkin(*args, **kwargs)
+
+    monkeypatch.setattr(commands, "record_checkin", flaky)
+    blocker = FakeBlocker([answer(choice="n")])
+    scheduler = Scheduler(controller, writer, blocker, now=lambda: clock[0])
+    reports = []
+    scheduler.report.connect(lambda kind, text: reports.append((kind, text)))
+
+    scheduler.tick()
+
+    assert calls["n"] == 3, "should have retried past the first two failures"
+    assert log()[-1]["type"] == "ping_answered"
+    assert reports == [], "it eventually succeeded; nothing should be reported as lost"
+
+
+def test_a_persistent_lock_timeout_is_surfaced_not_silently_dropped(wired, monkeypatch):
+    """The other half of the crux: retries are bounded, and when every one
+    of them fails, the user must be told — silent loss is the defect this
+    whole fix exists to close. `Scheduler.report` is the surface (mirrors
+    `Actions.report`); nothing here is a `print` that could vanish into a
+    detached process's stdout."""
+    from PySide6.QtCore import QTimer
+    from loop.store.lock import LockTimeout
+
+    monkeypatch.setattr(QTimer, "singleShot", staticmethod(lambda ms, fn: fn()))
+
+    clock, writer, controller = wired
+    open_one(writer)
+    clock[0] = 1200.0  # a ping is due
+
+    calls = {"n": 0}
+
+    def always_busy(*args, **kwargs):
+        calls["n"] += 1
+        raise LockTimeout("contended")
+
+    monkeypatch.setattr(commands, "record_checkin", always_busy)
+    blocker = FakeBlocker([answer(choice="n")])
+    scheduler = Scheduler(controller, writer, blocker, now=lambda: clock[0])
+    reports = []
+    scheduler.report.connect(lambda kind, text: reports.append((kind, text)))
+
+    scheduler.tick()  # must not raise, must not retry forever
+
+    assert calls["n"] == scheduler_module.RECORD_MAX_ATTEMPTS, "retries must be bounded"
+    assert all(e["type"] != "ping_answered" for e in log()), "the answer must never land"
+    assert len(reports) == 1, "the loss must be surfaced exactly once, not silently"
+    assert reports[0][0] == "error"
+    assert "loop #1" in reports[0][1]
+
+
+def test_a_moot_answer_and_a_contended_lock_are_handled_by_different_paths(wired, monkeypatch):
+    """The two cases must stay distinct in the code, not just in a
+    comment: a loop closed mid-prompt makes `record_checkin` *return*
+    `False` (no exception, no retry, correctly dropped); a busy lock makes
+    it *raise* `LockTimeout` (retried, then reported if it never lands).
+    This proves the closed-mid-prompt path is untouched by the retry
+    machinery — it does not go anywhere near `LockTimeout` handling."""
+    from PySide6.QtCore import QTimer
+
+    calls = []
+    monkeypatch.setattr(QTimer, "singleShot", staticmethod(
+        lambda ms, fn: calls.append(fn) or None
+    ))
+
+    clock, writer, controller = wired
+    open_one(writer)
+    clock[0] = 1200.0
+
+    class ClosesFirst:
+        def ask(self, prompt):
+            commands.close(writer, what_was_it="a", giveaway="b", five_min_path="c")
+            return answer(choice="n")
+
+    Scheduler(controller, writer, ClosesFirst(), now=lambda: clock[0]).tick()
+
+    assert calls == [], "a moot answer must never schedule a retry"
+    assert [event["type"] for event in log()][-1] == "loop_closed"
