@@ -99,7 +99,16 @@ asks it to surface (`loop/gui/instance.py`).
 ## The 100% checkpoint
 
 - [ ] Fires when the budget is exhausted, offering `x` / `c` / `e`.
-- [ ] `x` logs `decision: close` and does **not** fire again.
+- [ ] **Read the `x` button.** It says exactly `stop now` — no trailing
+      "then run `loop close`". That instruction pointed at a terminal the
+      app replaced, and this is the plan's only string change (spec
+      §"The p100 copy change"); every other prompt string is verbatim.
+- [ ] `x` logs `decision: close`, does **not** fire again — and opens the
+      postmortem dialog itself, right there, without being asked. Fill it
+      in: the loop is then closed (`loop_closed` in the log, the dashboard
+      back to no active loop). Cancelling the dialog instead leaves the
+      loop open, with the decision already recorded; Actions ▸ Close Loop…
+      still finishes the job.
 
 ## While a check-in is up: nothing else may run
 

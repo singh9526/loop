@@ -73,6 +73,10 @@ def main(argv: list[str] | None = None) -> int:
     # macOS, so both have to refuse for themselves.
     scheduler.busy_changed.connect(window.set_checkin_active)
     scheduler.busy_changed.connect(tray.set_checkin_active)
+    # `stop now` on the p100 check-in stops the loop: the scheduler writes
+    # the checkpoint, then the window opens the postmortem. Without this
+    # the button records a decision and nothing else happens.
+    scheduler.postmortem.connect(window.run_postmortem)
     scheduler.start()
 
     server.newConnection.connect(lambda: _surface(server, window))

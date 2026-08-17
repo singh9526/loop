@@ -276,6 +276,124 @@ def test_an_unexpected_exception_writing_the_answer_still_releases_the_guard(wir
     assert len(blocker2.prompts) == 1, "a released guard must allow a later tick to work"
 
 
+def test_the_p100_stop_now_button_actually_stops_the_loop(wired, monkeypatch):
+    """The spec's p100 copy change is two halves and only one shipped:
+    "it becomes `Choice("x", "stop now")`, **and the scheduler opens the
+    postmortem dialog directly once the checkpoint event is written**".
+
+    Without the second half, answering `x` writes `checkpoint_answered`
+    and stops: `active_id` stays 1, the status stays active, and because
+    `checkpoint_answered` keys `p100:{budget_s}` into
+    `checkpoints_answered`, p100 never fires again — the button that says
+    stop does nothing, and the app never mentions the budget again.
+    """
+    from loop.core import events
+    from loop.gui.window import MainWindow
+
+    clock, writer, controller = wired
+    open_one(writer)
+    clock[0] = 2700.0  # the budget is gone: p100 is due
+
+    window = MainWindow(controller, mode="dark")
+    monkeypatch.setattr("loop.gui.dialogs.lifecycle.CloseDialog",
+                        lambda parent: _Postmortem())
+
+    scheduler = Scheduler(controller, writer, FakeBlocker([answer(choice="x")]),
+                          now=lambda: clock[0])
+    scheduler.postmortem.connect(window.run_postmortem)
+    scheduler.tick()
+
+    kinds = [event["type"] for event in log()]
+    assert kinds[-3:] == ["checkpoint_shown", "checkpoint_answered", "loop_closed"]
+    assert log()[-2]["decision"] == "close"
+    assert log()[-1]["what_was_it"] == "a stale dns entry"
+    assert events.fold(log()).active_id is None, "the loop must actually be closed"
+    window.close()
+
+
+def test_the_overlay_is_down_before_the_postmortem_dialog_opens(wired, monkeypatch):
+    """Ordering, not decoration: an application-modal dialog opened while
+    the full-screen always-on-top overlay is still up renders *beneath*
+    it. The postmortem is emitted from the write path, which runs after
+    `ask()` has returned — and `ask()` hides the window in its own
+    `finally`."""
+    from PySide6.QtCore import QTimer
+
+    from loop.gui.checkin import CheckinWindow
+
+    clock, writer, controller = wired
+    open_one(writer)
+    clock[0] = 2700.0
+
+    class RealWindow:
+        def ask(self, prompt):
+            self.view = CheckinWindow(prompt, mode="dark")
+            QTimer.singleShot(0, lambda: self.view.press("x"))
+            return self.view.ask()
+
+    blocker = RealWindow()
+    scheduler = Scheduler(controller, writer, blocker, now=lambda: clock[0])
+    seen = []
+    scheduler.postmortem.connect(lambda: seen.append(blocker.view.isVisible()))
+    scheduler.tick()
+
+    assert seen == [False], "the overlay must be down before the dialog opens"
+
+
+def test_only_a_p100_answered_stop_now_opens_the_postmortem(wired):
+    """`c`, `e`, a timeout, and every ping and p75 answer must leave the
+    dialog shut — `x` is the only "I am done" there is."""
+    clock, writer, controller = wired
+
+    for label, budget_s, reply in (
+        ("p100 cut", 2700.0, answer(choice="c", fields={"new_stop_condition": "s2"})),
+        ("p100 timeout", 2700.0, answer(timed_out=True)),
+        ("p75 yes", 2100.0, answer(choice="y")),
+        ("ping no", 1200.0, answer(choice="n")),
+    ):
+        paths.events_path().unlink(missing_ok=True)   # a fresh log per case
+        open_one(writer)
+        clock[0] = budget_s
+
+        scheduler = Scheduler(controller, writer, FakeBlocker([reply]),
+                              now=lambda: clock[0])
+        opened = []
+        scheduler.postmortem.connect(lambda: opened.append(True))
+        scheduler.tick()
+        assert opened == [], f"{label} must not open the postmortem"
+
+
+def test_an_answer_that_arrived_too_late_opens_no_postmortem(wired):
+    """The loop was closed from a terminal while the p100 window was up.
+    `record_checkin` drops the answer as moot; opening a postmortem for a
+    loop that is already closed would only produce a refusal."""
+    clock, writer, controller = wired
+    open_one(writer)
+    clock[0] = 2700.0
+
+    class ClosesFirst:
+        def ask(self, prompt):
+            commands.close(writer, what_was_it="a", giveaway="b", five_min_path="c")
+            return answer(choice="x")
+
+    scheduler = Scheduler(controller, writer, ClosesFirst(), now=lambda: clock[0])
+    opened = []
+    scheduler.postmortem.connect(lambda: opened.append(True))
+    scheduler.tick()
+
+    assert opened == []
+    assert [event["type"] for event in log()][-1] == "loop_closed"
+
+
+class _Postmortem:
+    """The close dialog, filled in and accepted."""
+
+    def values(self):
+        return {"what_was_it": "a stale dns entry",
+                "giveaway": "the trace resolved to the old ip",
+                "five_min_path": "dig before tcpdump"}
+
+
 def test_ctrl_c_during_a_checkin_does_not_strand_the_busy_guard(wired):
     """`except Exception` misses `KeyboardInterrupt`: Ctrl-C in a terminal
     that launched `loop-gui` lands inside `blocker.ask()`, PySide6 swallows

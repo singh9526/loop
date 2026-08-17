@@ -2,7 +2,7 @@
 
 The translation between what a check-in shows and what the log records.
 Speaks only `core` and `blockers.base` — no store, no scheduler, no Qt —
-which is why both the daemon and the GUI can use it unchanged.
+which is what lets it be tested, and reused, without either.
 """
 
 from __future__ import annotations
@@ -63,9 +63,13 @@ def build_prompt(state: State, loop: Loop, due: schedule.Due) -> Prompt:
         title=f"budget gone · {span}",
         question="budget is gone. what now?",
         choices=[
-            # Was "stop now — then run `loop close`". The window opens the
-            # postmortem itself now, and pointing at a terminal the user has
-            # been told they no longer need is a dangling instruction.
+            # Was "stop now — then run `loop close`". Pointing at a
+            # terminal the user has been told they no longer need is a
+            # dangling instruction — so the app does it instead:
+            # `gui/scheduler.py` opens the postmortem once this answer's
+            # `checkpoint_answered` is written (`Scheduler.postmortem`).
+            # The CLI still expects `loop close` next; the string is no
+            # longer the place that says so.
             Choice("x", "stop now"),
             Choice("c", "cut scope"),
             Choice("e", "extend estimate"),

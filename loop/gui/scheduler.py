@@ -48,11 +48,18 @@ class Scheduler(QObject):
     # every action in between: on macOS an always-on-top window does not
     # cover the menu bar or the status items, so without this the user
     # can still reach Actions ▸ Close Loop… or the tray's Quit, and the
-    # application-modal dialog either opens renders *beneath* the
+    # application-modal dialog either one opens renders *beneath* the
     # full-screen overlay while `_insist()` re-raises over it once a
     # second and app-modality blocks keys to the overlay. Nothing kills
     # that: `KILL_AFTER_S` went with the daemon.
     busy_changed = Signal(bool)
+
+    # The p100 check-in's `x` — "stop now" — once its `checkpoint_answered`
+    # is on disk. `answers_to_events` records the *decision*; nothing in
+    # `core` closes a loop on the strength of it, and the user was told
+    # this button stops. `loop.gui.__main__` connects this to the window's
+    # postmortem, the same dialog Actions ▸ Close Loop… opens.
+    postmortem = Signal()
 
     def __init__(self, controller, writer, blocker, poll_ms: int = POLL_MS,
                  now=time.time) -> None:
@@ -166,9 +173,15 @@ class Scheduler(QObject):
         propagating too, the same as every other exit: a stranded `True`
         would silently stop every future check-in, worse than the bug this
         method exists to fix.
+
+        A p100 answered `stop now` opens the postmortem from here, and
+        only from here: "once the checkpoint event is written" is the
+        spec's wording and the write is what this method owns. An answer
+        that never landed — moot, or lost to a contended lock — opens
+        nothing.
         """
         try:
-            commands.record_checkin(self._writer, due=due, answers=answers)
+            written = commands.record_checkin(self._writer, due=due, answers=answers)
         except LockTimeout:
             if attempt < RECORD_MAX_ATTEMPTS:
                 # Rescheduled rather than retried in place: the event loop
@@ -205,5 +218,27 @@ class Scheduler(QObject):
             self._set_busy(False)
             raise
 
-        self._set_busy(False)
+        try:
+            if written and _stops_the_loop(due, answers):
+                # The other half of the p100 copy change: the label reads
+                # `stop now`, and this is what makes it true. The guard is
+                # deliberately still held — the postmortem is modal, and a
+                # poll firing while it is open would draw a check-in over
+                # it, the same collision the lockout exists to prevent.
+                # The overlay is already down: `ask()` hides it in its own
+                # `finally`, long before this runs.
+                self.postmortem.emit()
+        finally:
+            self._set_busy(False)
+
         self._controller.refresh()
+
+
+def _stops_the_loop(due: schedule.Due, answers) -> bool:
+    """The p100 answer that means "I am done": `x`, actually given.
+
+    A timeout is not it (nothing was decided), `c`/`e` are not it (the
+    loop continues under a new stop condition or a new budget), and no
+    ping or p75 answer can be — `x` exists on the p100 prompt alone.
+    """
+    return due.kind == "p100" and not answers.timed_out and answers.choice == "x"
