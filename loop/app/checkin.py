@@ -63,7 +63,10 @@ def build_prompt(state: State, loop: Loop, due: schedule.Due) -> Prompt:
         title=f"budget gone · {span}",
         question="budget is gone. what now?",
         choices=[
-            Choice("x", "stop now — then run `loop close`"),
+            # Was "stop now — then run `loop close`". The window opens the
+            # postmortem itself now, and pointing at a terminal the user has
+            # been told they no longer need is a dangling instruction.
+            Choice("x", "stop now"),
             Choice("c", "cut scope"),
             Choice("e", "extend estimate"),
         ],

@@ -132,7 +132,7 @@ def test_p100_prompt_offers_close_cut_and_extend():
     assert prompt.question == "budget is gone. what now?"
     assert [c.key for c in prompt.choices] == ["x", "c", "e"]
     assert [c.label for c in prompt.choices] == [
-        "stop now — then run `loop close`", "cut scope", "extend estimate",
+        "stop now", "cut scope", "extend estimate",
     ]
     assert [f.name for f in prompt.fields_after["c"]] == ["new_stop_condition"]
     assert [f.name for f in prompt.fields_after["e"]] == ["new_budget", "learned"]

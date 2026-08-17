@@ -6,8 +6,11 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
+from loop.app.writer import Writer
 from loop.gui import instance, theme
+from loop.gui.checkin import QtBlocker
 from loop.gui.controller import Controller
+from loop.gui.scheduler import Scheduler
 from loop.gui.tray import Tray
 from loop.gui.window import MainWindow
 
@@ -44,7 +47,12 @@ def main(argv: list[str] | None = None) -> int:
     mode = detect_mode(app)
     app.setStyleSheet(theme.stylesheet(mode))
 
-    controller = Controller()
+    # One `Writer` per process: `Controller` shares it with `Actions`
+    # (via `controller.writer`) and the scheduler shares it too, so every
+    # mutation in this process goes through the same clock and the same
+    # lock-holding path.
+    writer = Writer()
+    controller = Controller(writer=writer)
     window = MainWindow(controller, mode)
     tray = Tray(window, mode)
     controller.changed.connect(window.bind)
@@ -56,6 +64,9 @@ def main(argv: list[str] | None = None) -> int:
     tray.show()
     window.show()
     controller.start()
+
+    scheduler = Scheduler(controller, writer, QtBlocker(mode))
+    scheduler.start()
 
     server.newConnection.connect(lambda: _surface(server, window))
     return app.exec()
