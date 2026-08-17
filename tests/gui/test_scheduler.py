@@ -167,7 +167,9 @@ def test_a_lock_timeout_recording_the_answer_does_not_crash_and_defers_the_write
     a real answer in hand here — `tick()` must not raise, and must not
     drop it on this first failure: the retry is merely scheduled (through
     `QTimer.singleShot`, never fired synchronously), so nothing is written
-    *yet*, but nothing has been given up on either."""
+    *yet*, but nothing has been given up on either. The busy guard stays
+    held — checked directly here, not just through its effect — because
+    the operation (the retry) is still outstanding."""
     from loop.store.lock import LockTimeout
 
     clock, writer, controller = wired
@@ -184,6 +186,79 @@ def test_a_lock_timeout_recording_the_answer_does_not_crash_and_defers_the_write
     assert blocker.prompts[0].kind == "ping"
     # Not written yet — the retry is only scheduled, not run synchronously.
     assert all(e["type"] != "ping_answered" for e in log())
+    assert scheduler._busy is True, "the guard must stay held while a retry is outstanding"
+
+
+def test_a_second_tick_while_a_retry_is_outstanding_shows_no_second_prompt(wired, monkeypatch):
+    """The reproduction for the critical finding this round exists to fix:
+    guarding only the window's display time — the first version of this
+    fix — let a poll firing while a retry sat unresolved show a second
+    full-screen prompt for the same due ping. Pings have no
+    `checkpoints_pending`-style backoff (`_ping_due` in `core/schedule.py`
+    is driven purely by `last_ping_elapsed`, which only advances once a
+    write actually lands), so nothing else stood in the way.
+
+    `QTimer.singleShot` is patched to record its callback without firing
+    it, so the retry stays outstanding — deterministically, with no real
+    delay — for the second `tick()` to land in the middle of."""
+    from PySide6.QtCore import QTimer
+    from loop.store.lock import LockTimeout
+
+    scheduled = []
+    monkeypatch.setattr(QTimer, "singleShot", staticmethod(
+        lambda ms, fn: scheduled.append(fn)
+    ))
+
+    def always_busy(*args, **kwargs):
+        raise LockTimeout("contended")
+
+    monkeypatch.setattr(commands, "record_checkin", always_busy)
+
+    clock, writer, controller = wired
+    open_one(writer)
+    clock[0] = 1200.0  # a ping is due
+
+    blocker = FakeBlocker([answer(choice="n"), answer(choice="n")])
+    scheduler = Scheduler(controller, writer, blocker, now=lambda: clock[0])
+
+    scheduler.tick()
+    scheduler.tick()  # the poll timer firing again while the retry is outstanding
+
+    assert scheduled, "a retry should have been scheduled from the first tick"
+    assert len(blocker.prompts) == 1, "a second prompt for the same due must not appear"
+
+
+def test_an_unexpected_exception_writing_the_answer_still_releases_the_guard(wired, monkeypatch):
+    """Requirement: the busy guard must be released on every exit path,
+    including one nobody planned for. A guard stuck `True` here would be
+    worse than the duplicate-prompt bug this whole fix exists to close —
+    the app would look alive and simply never ask again, with nothing on
+    screen to say why. Deliberately not a `LockTimeout` here: this is the
+    "real bug, not contention" branch."""
+    clock, writer, controller = wired
+    open_one(writer)
+    clock[0] = 1200.0  # a ping is due
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("not a lock problem")
+
+    monkeypatch.setattr(commands, "record_checkin", broken)
+    blocker = FakeBlocker([answer(choice="n")])
+    scheduler = Scheduler(controller, writer, blocker, now=lambda: clock[0])
+
+    with pytest.raises(RuntimeError):
+        scheduler.tick()
+
+    assert scheduler._busy is False, "an unexpected exception must not strand the guard"
+
+    # The symptom of a stranded guard is total, silent, permanent silence:
+    # prove the scheduler can still serve a later tick, not just that the
+    # flag's value looks right.
+    monkeypatch.setattr(commands, "record_checkin", lambda *a, **k: None)
+    blocker2 = FakeBlocker([answer(choice="n")])
+    scheduler._blocker = blocker2
+    scheduler.tick()
+    assert len(blocker2.prompts) == 1, "a released guard must allow a later tick to work"
 
 
 def test_a_transient_lock_timeout_retries_and_the_answer_survives(wired, monkeypatch):

@@ -50,7 +50,14 @@ class Scheduler(QObject):
         self._writer = writer
         self._blocker = blocker
         self._now = now
-        self._showing = False
+        # Covers everything from "this tick decided a due is its to
+        # handle" to "the write landed, or every retry is spent" — not
+        # just the time the window is on screen. `record_checkin` can
+        # keep working through an async retry chain (see `_write_answer`)
+        # well after `ask()` has already returned, and a second `tick()`
+        # firing in that gap must see this and back off, the same as it
+        # would while the window is still up.
+        self._busy = False
 
         self._timer = QTimer(self)
         self._timer.setInterval(poll_ms)
@@ -63,10 +70,15 @@ class Scheduler(QObject):
         self._timer.stop()
 
     def tick(self) -> None:
-        if self._showing:
-            # A check-in blocks for up to five minutes in a nested event
-            # loop, and this timer keeps firing underneath it. Two windows
-            # for one interval is the bug this prevents.
+        if self._busy:
+            # A check-in is either still on screen, or its answer is
+            # still working through a retry after a contended lock.
+            # Pings have no `checkpoints_pending`-style backoff — they
+            # are driven purely by `last_ping_elapsed`, which only
+            # advances once a write actually lands — so without this
+            # guard spanning the retry too, a second poll firing before
+            # the write lands would show a second full-screen prompt for
+            # the same due ping.
             return
 
         try:
@@ -94,61 +106,83 @@ class Scheduler(QObject):
                 # Task 15, possibly the daemon) held the write lock past
                 # its timeout. Skip the whole tick, not just this write:
                 # nothing has been shown yet, so there is no answer to
-                # lose, and showing the window now would let a user answer
-                # a checkpoint the log never recorded as shown, breaking
+                # lose (and the guard was never raised for this due), and
+                # showing the window now would let a user answer a
+                # checkpoint the log never recorded as shown, breaking
                 # the shown-before-answered invariant `record_checkin` and
                 # the forensics tests both depend on. The next poll tries
                 # again from a clean read.
                 return
 
-        self._showing = True
+        self._busy = True
         try:
             answers = self._blocker.ask(prompt)
-        finally:
-            self._showing = False
+        except Exception:
+            # The guard must never leak on an error path: a stuck `True`
+            # here would silently stop every future check-in, which is
+            # worse than the duplicate-prompt bug it exists to prevent —
+            # the app would look alive and simply never ask again.
+            self._busy = False
+            raise
 
         self._write_answer(due, answers)
 
     def _write_answer(self, due: schedule.Due, answers, attempt: int = 1) -> None:
         """Write an answer already collected from the user, retrying past
-        lock contention rather than dropping it.
+        lock contention rather than dropping it — and owning the release
+        of the busy guard `tick()` raised, since this method keeps running
+        (via `QTimer.singleShot`) well after `tick()` itself has returned.
 
         `record_checkin` *returning* `False` (the loop closed, was
         abandoned, or was paused out from under the prompt) is the correct,
         deliberate drop — the answer is genuinely moot, there is nothing to
-        retry, and this method does nothing extra for it: it falls through
-        the `try` below like any other successful call. `record_checkin`
-        *raising* `LockTimeout` is the other case, and the two must not be
-        handled by the same branch: the answer here is still valid, so it
-        is retried, bounded, off the timer, before ever being given up on.
+        retry, and it falls straight to the release-and-refresh at the
+        bottom like any other successful call. `record_checkin` *raising*
+        `LockTimeout` is the other case, and the two are never handled by
+        the same branch: the answer here is still valid, so it is retried,
+        bounded, off the timer, before ever being given up on. Any other
+        exception — a real bug, not contention — releases the guard before
+        propagating too, the same as every other exit: a stranded `True`
+        would silently stop every future check-in, worse than the bug this
+        method exists to fix.
         """
         try:
             commands.record_checkin(self._writer, due=due, answers=answers)
         except LockTimeout:
-            if attempt >= RECORD_MAX_ATTEMPTS:
-                # Every retry lost the race for the lock. The answer — and
-                # any text the user typed into a cut/extend field — is
-                # gone. A `print` here would vanish into a detached
-                # process's stdout; `report` is the same signal the
-                # window already renders refusals with.
-                self.report.emit(
-                    "error",
-                    f"loop #{due.loop_id}: your answer could not be saved "
-                    f"after {RECORD_MAX_ATTEMPTS} tries — the write lock "
-                    "stayed busy. nothing was recorded; you may need to "
-                    "answer again.",
-                )
-                self._controller.refresh()
+            if attempt < RECORD_MAX_ATTEMPTS:
+                # Rescheduled rather than retried in place: the event loop
+                # gets to run in between attempts (paint, tray, the
+                # controller's own poll), instead of this call stacking
+                # several blocking lock-waits with nothing processed
+                # between them. Still busy — the retry above owns what
+                # happens next, including releasing the guard.
+                try:
+                    QTimer.singleShot(
+                        RECORD_RETRY_MS,
+                        lambda: self._write_answer(due, answers, attempt + 1),
+                    )
+                except Exception:
+                    self._busy = False
+                    raise
                 return
-            # Rescheduled rather than retried in place: the event loop
-            # gets to run in between attempts (paint, tray, the
-            # controller's own poll), instead of this call stacking
-            # several blocking lock-waits with nothing processed between
-            # them.
-            QTimer.singleShot(
-                RECORD_RETRY_MS,
-                lambda: self._write_answer(due, answers, attempt + 1),
+            # Every retry lost the race for the lock. The answer — and
+            # any text the user typed into a cut/extend field — is gone.
+            # A `print` here would vanish into a detached process's
+            # stdout; `report` is the same signal the window already
+            # renders refusals with.
+            self._busy = False
+            self.report.emit(
+                "error",
+                f"loop #{due.loop_id}: your answer could not be saved "
+                f"after {RECORD_MAX_ATTEMPTS} tries — the write lock "
+                "stayed busy. nothing was recorded; you may need to "
+                "answer again.",
             )
+            self._controller.refresh()
             return
+        except Exception:
+            self._busy = False
+            raise
 
+        self._busy = False
         self._controller.refresh()
