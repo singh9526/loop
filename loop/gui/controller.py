@@ -94,7 +94,14 @@ class Controller(QObject):
     def _reload_if_changed(self) -> None:
         """Size is a complete change signal on an append-only file, and
         unlike mtime it has no filesystem granularity to lose a write in.
-        A repair that shortens the file changes it too.
+
+        One gap, known and accepted: `jsonl.append` repairs a torn tail
+        before writing, so a poll that straddles a repair (−k bytes) and
+        the append that follows it (+m bytes) can see the same size back
+        if k == m, and misses that write until the next one. It costs a
+        stale dashboard for one write after a crash — the scheduler folds
+        the log itself and is unaffected — and it is the only way this
+        file's size fails to be monotonic.
 
         Raising here leaves `self._size` unchanged, so the next poll
         retries the read — that is what lets a repaired log recover

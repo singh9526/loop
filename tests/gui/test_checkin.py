@@ -219,8 +219,9 @@ def test_submitted_fields_complete_the_session(qapp):
 def test_fields_submitted_when_none_were_asked_for_are_refused(qapp):
     """`PromptSession.submit_fields` never checks its stage: on a ping
     window it would take `{"junk": "value"}`, mark the session done and
-    settle it as a `ping_answered` with no choice at all. `session.py` is
-    shared with the CLI blockers until Task 15, so the door is shut here.
+    settle it as a `ping_answered` with no choice at all. `session.py`
+    stays a toolkit-free state machine with its own tests, so the door is
+    shut here rather than in it.
     """
     view = window(ping_prompt())
     assert view.submit_fields({"junk": "value"}) == []

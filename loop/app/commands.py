@@ -341,8 +341,8 @@ def record_checkin(writer: Writer, *, due, answers) -> bool:
     A blocking prompt can sit for five minutes. If the loop it was built
     for was closed, abandoned, or paused from elsewhere in that time, the
     answers are about a state that no longer exists. Checking that inside
-    the lock — rather than in a separate read, as `sched/tick.py` did —
-    closes the window between the check and the append.
+    the lock — rather than in a separate read, the way the deleted daemon
+    did — closes the window between the check and the append.
     """
     from loop.app import checkin
 
