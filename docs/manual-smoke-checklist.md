@@ -101,6 +101,28 @@ asks it to surface (`loop/gui/instance.py`).
 - [ ] Fires when the budget is exhausted, offering `x` / `c` / `e`.
 - [ ] `x` logs `decision: close` and does **not** fire again.
 
+## While a check-in is up: nothing else may run
+
+The overlay is always-on-top, but on macOS that does **not** cover the menu
+bar or the status-item area, and on both platforms a keyboard shortcut can
+still reach a window behind it. Every one of the ten actions opens an
+*application-modal* dialog, which would render beneath the overlay while
+`_insist()` re-raises over it once a second and modality blocks keys to the
+check-in — and `ask()` cannot take the overlay down until that invisible
+dialog is dismissed. There is no watchdog process left to kill either
+window. `Scheduler.busy_changed` is what refuses this; confirm it by hand:
+
+- [ ] With a check-in on screen, pull down **Actions** in the menu bar.
+      Every item is greyed out — **Close Loop…** in particular cannot be
+      chosen, and no dialog appears anywhere.
+- [ ] Click the tray/status-item icon and choose **Quit** while the
+      check-in is up. Nothing happens: no confirmation box (it would be
+      invisible under the overlay), no quit, and the check-in is still
+      answerable.
+- [ ] Answer the check-in. The menu items are live again immediately —
+      including the row buttons on the dashboard (rule-out, resume) —
+      and the tray's Quit confirms as usual.
+
 ## Escape guarantees (and their absence)
 
 Unlike the deleted macOS overlay, the Qt window is **insistent, not

@@ -10,6 +10,8 @@ that page binds itself; this module only switches to it.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QMainWindow, QPushButton, QStackedWidget, QToolBar,
@@ -54,6 +56,8 @@ class MainWindow(QMainWindow):
         self._controller = controller
         self._mode = mode
         self._actions: dict[str, QAction] = {}
+        self._dashboard: DashboardView | None = None
+        self._checkin_active = False
         # `controller` is `None` in the clock-only tests (test_window.py) —
         # they never click anything, so a runner-less window must still
         # construct cleanly. `Actions` needs a `Writer`, which only a real
@@ -67,8 +71,11 @@ class MainWindow(QMainWindow):
         self._build()
         if self._runner is not None:
             self._runner.report.connect(self._on_report)
-            self._stack.resume_requested.connect(self._runner.run_resume)
-            self._hypotheses.kill_requested.connect(self._runner.run_hyp_kill)
+            # Through `_trigger`-style guards, not straight to the runner:
+            # a row button is a second door into the same commands, and the
+            # check-in lockout has to hold both.
+            self._stack.resume_requested.connect(self._resume_requested)
+            self._hypotheses.kill_requested.connect(self._kill_requested)
 
     def has_active_loop(self) -> bool:
         return self._controller is not None and self._controller.active_id is not None
@@ -161,9 +168,56 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self._logbook_action)
         return toolbar
 
+    def set_checkin_active(self, active: bool) -> None:
+        """Refuse every action while a check-in owns the screen.
+
+        The scheduler's `busy_changed` drives this. It has to live here
+        rather than in `view.build`, which knows only what the log says
+        and nothing about what is on screen — and it has to survive the
+        1 Hz rebind, which is why `bind` masks rather than this method
+        calling `setEnabled` once.
+
+        Deferring is not an option worth taking: every one of these ten
+        actions opens an application-modal dialog, and a modal dialog
+        opened while the overlay is up renders beneath it, blocks keys to
+        it, and holds `ask()`'s `finally: hide()` until it is dismissed —
+        with nothing left to kill either window. Refusing costs the user
+        one click after the check-in they are already answering.
+        """
+        if active == self._checkin_active:
+            return
+        self._checkin_active = active
+        if self._dashboard is not None:
+            self.bind(self._dashboard)
+
+    def run_postmortem(self) -> None:
+        """The p100 `stop now` continuation, called by the scheduler once
+        the checkpoint event is written and the overlay is down.
+
+        Deliberately not routed through `_trigger`: the lockout above is
+        still on (the scheduler holds its guard until this returns), and
+        this dialog *is* the check-in's own next step, not a competing
+        action reached around it.
+        """
+        if self._runner is None:
+            return
+        self.surface()
+        self._runner.run_close()
+
     def _trigger(self, name: str) -> None:
-        if self._runner is not None:
-            self._runner.run(name)
+        if self._runner is None or self._checkin_active:
+            return
+        self._runner.run(name)
+
+    def _resume_requested(self, loop_id: int) -> None:
+        if self._runner is None or self._checkin_active:
+            return
+        self._runner.run_resume(loop_id)
+
+    def _kill_requested(self, hyp_id: int) -> None:
+        if self._runner is None or self._checkin_active:
+            return
+        self._runner.run_hyp_kill(hyp_id)
 
     def _toggle_logbook(self) -> None:
         """Flip between the dashboard and the logbook. Entering the
@@ -178,7 +232,17 @@ class MainWindow(QMainWindow):
 
     def bind(self, dashboard: DashboardView) -> None:
         """One place decides what is live. Ten scattered setEnabled
-        calls would each be a place to forget."""
+        calls would each be a place to forget.
+
+        A check-in in progress is the one input that does not come from
+        the view, and it is applied by emptying `enabled_actions` here so
+        the row buttons (`StackBar`, `HypothesisList`, which read the same
+        field) go with it. The unmasked view is kept so lifting the
+        lockout can rebind it without waiting for the next poll.
+        """
+        self._dashboard = dashboard
+        if self._checkin_active:
+            dashboard = replace(dashboard, enabled_actions=frozenset())
         for name, action in self._actions.items():
             action.setEnabled(name in dashboard.enabled_actions)
         self._clock.setText(_clock_text(dashboard))

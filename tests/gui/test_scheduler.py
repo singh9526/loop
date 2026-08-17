@@ -276,6 +276,127 @@ def test_an_unexpected_exception_writing_the_answer_still_releases_the_guard(wir
     assert len(blocker2.prompts) == 1, "a released guard must allow a later tick to work"
 
 
+def test_ctrl_c_during_a_checkin_does_not_strand_the_busy_guard(wired):
+    """`except Exception` misses `KeyboardInterrupt`: Ctrl-C in a terminal
+    that launched `loop-gui` lands inside `blocker.ask()`, PySide6 swallows
+    it, and `_busy` sticks `True` forever — the app looks alive and never
+    checks in again, with no watchdog left to notice."""
+    clock, writer, controller = wired
+    open_one(writer)
+    clock[0] = 1200.0  # a ping is due
+
+    class Interrupted:
+        def ask(self, prompt):
+            raise KeyboardInterrupt
+
+    scheduler = Scheduler(controller, writer, Interrupted(), now=lambda: clock[0])
+    with pytest.raises(KeyboardInterrupt):
+        scheduler.tick()
+    assert scheduler._busy is False
+
+    blocker = FakeBlocker([answer(choice="n")])
+    scheduler._blocker = blocker
+    scheduler.tick()
+    assert len(blocker.prompts) == 1, "a released guard must allow a later tick to work"
+
+
+def test_the_busy_state_is_announced_around_the_checkin(wired):
+    """The window and the tray have no other way to know a check-in owns
+    the screen: `Scheduler._busy` is private and `view.build` knows nothing
+    about it."""
+    clock, writer, controller = wired
+    open_one(writer)
+    clock[0] = 1200.0
+
+    seen = []
+    during = []
+
+    class Watching:
+        def ask(self, prompt):
+            during.append(list(seen))
+            return answer(choice="n")
+
+    scheduler = Scheduler(controller, writer, Watching(), now=lambda: clock[0])
+    scheduler.busy_changed.connect(seen.append)
+    scheduler.tick()
+
+    assert during == [[True]], "the lockout must be on before the window is drawn"
+    assert seen == [True, False], "and must be lifted once the answer has landed"
+
+
+def test_a_menu_or_tray_action_cannot_undercut_a_checkin_in_progress(wired, monkeypatch):
+    """The reproduction. On macOS an always-on-top window does not cover
+    the menu bar or the status items, so during a check-in the user can
+    still reach Actions ▸ Close Loop… and the tray's Quit. Either opens an
+    application-modal dialog that renders *beneath* the full-screen overlay
+    while `_insist()` re-raises over it once a second and app-modality
+    blocks keys to the overlay — and `ask()`'s `finally: hide()` cannot run
+    until that invisible dialog is dismissed. There is no watchdog left to
+    kill it.
+
+    Wired here the way `loop.gui.__main__.main` wires it.
+    """
+    from loop.gui.tray import Tray
+    from loop.gui.window import MainWindow
+
+    clock, writer, controller = wired
+    open_one(writer)
+    clock[0] = 1200.0
+
+    window = MainWindow(controller, mode="dark")
+    tray = Tray(window, mode="dark")
+    controller.changed.connect(window.bind)
+    controller.refresh()
+    assert window._actions["close"].isEnabled(), "the premise: it is reachable normally"
+
+    quits = []
+    monkeypatch.setattr("PySide6.QtWidgets.QApplication.quit", staticmethod(
+        lambda: quits.append(True)
+    ))
+    from PySide6.QtWidgets import QMessageBox
+
+    boxes = []
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(
+        lambda *a, **k: boxes.append(a) or QMessageBox.Discard
+    ))
+    # Never let a real modal dialog open here: `exec()` under the offscreen
+    # platform would block this test forever, which is the bug's own shape.
+    dialogs = []
+    monkeypatch.setattr("loop.gui.dialogs.lifecycle.CloseDialog",
+                        lambda parent: dialogs.append(parent) or _Cancelled())
+
+    during = {}
+
+    class Watching:
+        def ask(self, prompt):
+            controller.refresh()      # the 1 Hz poll, firing mid-check-in
+            during["close"] = window._actions["close"].isEnabled()
+            window._trigger("close")  # a shortcut, or a queued click
+            tray._confirm_quit()
+            return answer(choice="n")
+
+    scheduler = Scheduler(controller, writer, Watching(), now=lambda: clock[0])
+    scheduler.busy_changed.connect(window.set_checkin_active)
+    scheduler.busy_changed.connect(tray.set_checkin_active)
+    scheduler.tick()
+
+    assert during["close"] is False, "no action may be reachable while a check-in is up"
+    assert dialogs == [], "no modal dialog may open under the overlay"
+    assert quits == [], "the tray must not quit the app out from under a check-in"
+    assert boxes == [], "and must not raise a modal confirmation there either"
+    assert window._actions["close"].isEnabled(), "the lockout must lift afterwards"
+    tray._confirm_quit()
+    assert quits == [True], "the tray must work again once the check-in is over"
+    window.close()
+
+
+class _Cancelled:
+    """Stands in for a dialog nobody should have opened."""
+
+    def values(self):
+        return None
+
+
 def test_a_transient_lock_timeout_retries_and_the_answer_survives(wired, monkeypatch):
     """The crux of the fix: a `LockTimeout` on `record_checkin` must not
     be a permanent loss of an answer the user already gave. Driven

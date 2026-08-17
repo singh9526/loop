@@ -1,8 +1,8 @@
 """The poll loop that replaces the daemon.
 
-Same sequence `sched/tick.py` ran, minus the detached process: ask core
-what is due, draw it, write the answer down. The staleness re-check now
-happens inside `commands.record_checkin`, under the lock, instead of in a
+The same sequence the deleted daemon ran, minus the detached process: ask
+core what is due, draw it, write the answer down. The staleness re-check
+happens inside `commands.record_checkin`, under the lock, rather than in a
 separate read.
 """
 
@@ -43,6 +43,17 @@ class Scheduler(QObject):
 
     report = Signal(str, str)
 
+    # True while a check-in owns the screen (and until its answer has
+    # landed), false once it does not. The window and the tray refuse
+    # every action in between: on macOS an always-on-top window does not
+    # cover the menu bar or the status items, so without this the user
+    # can still reach Actions ▸ Close Loop… or the tray's Quit, and the
+    # application-modal dialog either opens renders *beneath* the
+    # full-screen overlay while `_insist()` re-raises over it once a
+    # second and app-modality blocks keys to the overlay. Nothing kills
+    # that: `KILL_AFTER_S` went with the daemon.
+    busy_changed = Signal(bool)
+
     def __init__(self, controller, writer, blocker, poll_ms: int = POLL_MS,
                  now=time.time) -> None:
         super().__init__()
@@ -62,6 +73,14 @@ class Scheduler(QObject):
         self._timer = QTimer(self)
         self._timer.setInterval(poll_ms)
         self._timer.timeout.connect(self.tick)
+
+    def _set_busy(self, busy: bool) -> None:
+        """The one writer of `_busy`, so the lockout the window and the
+        tray apply can never drift from the guard `tick()` reads."""
+        if busy == self._busy:
+            return
+        self._busy = busy
+        self.busy_changed.emit(busy)
 
     def start(self) -> None:
         self._timer.start()
@@ -101,10 +120,10 @@ class Scheduler(QObject):
                     self._writer, loop_id=loop.id, kind=due.kind
                 )
             except LockTimeout:
-                # `LockTimeout` is not a `LoopError` — it comes straight out
-                # of `Writer.mutate` when another process (still, until
-                # Task 15, possibly the daemon) held the write lock past
-                # its timeout. Skip the whole tick, not just this write:
+                # `LockTimeout` is not a `LoopError` — it comes straight
+                # out of `Writer.mutate` when another process (a CLI
+                # command in a terminal) held the write lock past its
+                # timeout. Skip the whole tick, not just this write:
                 # nothing has been shown yet, so there is no answer to
                 # lose (and the guard was never raised for this due), and
                 # showing the window now would let a user answer a
@@ -114,15 +133,17 @@ class Scheduler(QObject):
                 # again from a clean read.
                 return
 
-        self._busy = True
+        self._set_busy(True)
         try:
             answers = self._blocker.ask(prompt)
-        except Exception:
-            # The guard must never leak on an error path: a stuck `True`
-            # here would silently stop every future check-in, which is
-            # worse than the duplicate-prompt bug it exists to prevent —
-            # the app would look alive and simply never ask again.
-            self._busy = False
+        except BaseException:
+            # `BaseException`, not `Exception`: a Ctrl-C in the terminal
+            # that launched `loop-gui` lands here, PySide6 swallows it,
+            # and a guard left `True` would silently stop every future
+            # check-in — worse than the duplicate-prompt bug it exists to
+            # prevent, since the app looks alive and simply never asks
+            # again, with no watchdog left to notice.
+            self._set_busy(False)
             raise
 
         self._write_answer(due, answers)
@@ -162,7 +183,7 @@ class Scheduler(QObject):
                         lambda: self._write_answer(due, answers, attempt + 1),
                     )
                 except Exception:
-                    self._busy = False
+                    self._set_busy(False)
                     raise
                 return
             # Every retry lost the race for the lock. The answer — and
@@ -170,7 +191,7 @@ class Scheduler(QObject):
             # A `print` here would vanish into a detached process's
             # stdout; `report` is the same signal the window already
             # renders refusals with.
-            self._busy = False
+            self._set_busy(False)
             self.report.emit(
                 "error",
                 f"loop #{due.loop_id}: your answer could not be saved "
@@ -181,8 +202,8 @@ class Scheduler(QObject):
             self._controller.refresh()
             return
         except Exception:
-            self._busy = False
+            self._set_busy(False)
             raise
 
-        self._busy = False
+        self._set_busy(False)
         self._controller.refresh()

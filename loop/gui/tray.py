@@ -45,6 +45,7 @@ class Tray(QSystemTrayIcon):
         super().__init__(window)
         self._window = window
         self._mode = mode
+        self._checkin_active = False
         self.setIcon(render_icon(None, mode))
 
         menu = QMenu()
@@ -62,8 +63,23 @@ class Tray(QSystemTrayIcon):
     def set_burn(self, fraction: float | None) -> None:
         self.setIcon(render_icon(fraction, self._mode))
 
+    def set_checkin_active(self, active: bool) -> None:
+        """Driven by the scheduler's `busy_changed`, same as the window's
+        own lockout. A status-item menu is reachable during a check-in on
+        macOS — an always-on-top window does not cover the menu bar."""
+        self._checkin_active = active
+
     def _confirm_quit(self) -> None:
         from PySide6.QtWidgets import QApplication
+
+        if self._checkin_active:
+            # Silently, because there is nowhere to say it: the check-in
+            # covers every screen, and the confirmation this would
+            # otherwise raise is application-modal — it would render
+            # *beneath* the overlay, block keys to it, and leave `ask()`
+            # unable to take it down. The user answers the check-in in
+            # front of them, then quits.
+            return
 
         if self._window.has_active_loop():
             answer = QMessageBox.warning(

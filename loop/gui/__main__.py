@@ -67,6 +67,12 @@ def main(argv: list[str] | None = None) -> int:
 
     scheduler = Scheduler(controller, writer, QtBlocker(mode))
     scheduler.report.connect(window.show_report)
+    # Nothing may open an application-modal dialog while a check-in owns
+    # the screen: it would render beneath the overlay, block keys to it,
+    # and hold it there. The menu bar and the tray stay reachable on
+    # macOS, so both have to refuse for themselves.
+    scheduler.busy_changed.connect(window.set_checkin_active)
+    scheduler.busy_changed.connect(tray.set_checkin_active)
     scheduler.start()
 
     server.newConnection.connect(lambda: _surface(server, window))
