@@ -15,20 +15,36 @@ submits a search — rather than caching the controller's poll. Logbook
 data does not need to track the clock at 1Hz the way the dashboard's
 burn meter does; a query answered on request is enough for a read that
 already means "let me check something."
+
+Reading the log directly means this widget, not just `Controller`, can
+meet `jsonl.CorruptLogError` — the recoverable-interior-corruption case
+the whole app is built to tolerate. `_on_search` (the one read path;
+`refresh` calls it too) catches it and reuses `Controller`'s own
+fallback — `view.unreadable` bound into a `widgets.ErrorBanner` — rather
+than inventing a second "the log is broken" message.
 """
 
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from typing import Callable
 
 from PySide6.QtWidgets import (
     QFrame, QGridLayout, QLabel, QLineEdit, QScrollArea, QVBoxLayout, QWidget,
 )
 
+from loop.app import view
 from loop.core import events, search, stats
 from loop.core.timefmt import format_duration
-from loop.store import jsonl
+from loop.gui.widgets import ErrorBanner
+from loop.store import jsonl, paths
+
+# `ErrorBanner.bind` only ever reads `.error` off whatever it's given —
+# a real `DashboardView` when the dashboard uses it, this stand-in here.
+# Building a full `DashboardView` just to say "no error" would need every
+# other one of its fields for no reason.
+_NO_ERROR = SimpleNamespace(error=None)
 
 # (label, value-getter) for the six substantive lines `stats.render` prints
 # — its own two blank lines are terminal spacing, not data, and are left
@@ -72,6 +88,10 @@ class LogbookView(QWidget):
         self._controller = controller
         layout = QVBoxLayout(self)
 
+        self._error = ErrorBanner()
+        self._error.setVisible(False)  # hidden until the first read, good or bad
+        layout.addWidget(self._error)
+
         self._search = QLineEdit()
         self._search.setPlaceholderText("search closed and abandoned loops…")
         self._search.returnPressed.connect(self._on_search)
@@ -106,10 +126,26 @@ class LogbookView(QWidget):
 
     def _on_search(self) -> None:
         term = self._search.text().strip()
-        log = jsonl.read_all()
+        try:
+            log = jsonl.read_all()
+        except jsonl.CorruptLogError as exc:
+            self._show_unreadable(exc)
+            return
+        self._error.bind(_NO_ERROR)
         report = stats.compute(log, time.time())
         matches = search.find(events.fold(log), log, term) if term else []
         self.bind(report, matches)
+
+    def _show_unreadable(self, exc: jsonl.CorruptLogError) -> None:
+        """The same degraded view `Controller.refresh` already shows for
+        this exact exception, reused rather than reinvented: the stats
+        grid and any matches already on screen are left exactly as they
+        were — the last state that folded cleanly beats a blank or
+        half-updated one, and re-deriving anything from a log we cannot
+        fold would only be guessing."""
+        self._error.bind(view.unreadable(
+            None, path=str(paths.events_path()), line=_line_number(exc), frozen_at=0.0,
+        ))
 
     def bind(self, report: dict, matches: list[search.Match]) -> None:
         for name, getter in ROWS:
@@ -133,3 +169,19 @@ def _clear(layout) -> None:
         widget = item.widget()
         if widget is not None:
             widget.deleteLater()
+
+
+def _line_number(exc: jsonl.CorruptLogError) -> int:
+    """Same parse `Controller` does: `CorruptLogError` carries the line in
+    its message ('<path>: line N is not valid JSON'), and there is no
+    structured field to read it from instead. Duplicated rather than
+    imported because `Controller`'s copy is a private, undocumented
+    detail of a class this widget otherwise has no reason to depend on —
+    matching its *behaviour* here, not adding a coupling to it."""
+    text = str(exc)
+    marker = "line "
+    if marker not in text:
+        return 0
+    tail = text.split(marker, 1)[1]
+    digits = tail.split(" ", 1)[0]
+    return int(digits) if digits.isdigit() else 0
