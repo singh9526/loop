@@ -97,6 +97,16 @@ class CheckinWindow(QWidget):
     def submit_fields(self, values: dict[str, str]) -> list[str]:
         if self._answers is not None:
             return []
+        if not self._session.pending_fields():
+            # Nothing is asking for fields. `PromptSession.submit_fields`
+            # does not check its own stage, so on a ping window this would
+            # otherwise complete the session with a choice of `None` and
+            # whatever keys the caller passed. The window's own UI cannot
+            # reach that — the Submit button only exists while fields are
+            # on screen — but `submit_fields` is public, so the door is
+            # shut here rather than in `session.py`, which the CLI
+            # blockers still share until Task 15.
+            return []
         missing = self._session.submit_fields(values)
         self._show_missing(missing)
         if not missing:
@@ -220,7 +230,7 @@ class CheckinWindow(QWidget):
         layout.addStretch(1)
 
         self._title = QLabel(self._prompt.title)
-        self._title.setObjectName("label")
+        self._title.setObjectName("overlay_title")
         layout.addWidget(self._title)
 
         # `theme.py` styles `QFrame#banner`, not `QLabel#banner` — the
@@ -230,11 +240,13 @@ class CheckinWindow(QWidget):
             self._banner = QFrame()
             self._banner.setObjectName("banner")
             banner_layout = QVBoxLayout(self._banner)
-            banner_layout.addWidget(QLabel(self._prompt.warning))
+            warning = QLabel(self._prompt.warning)
+            warning.setObjectName("overlay_warning")
+            banner_layout.addWidget(warning)
             layout.addWidget(self._banner)
 
         self._question = QLabel(self._prompt.question)
-        self._question.setObjectName("question")
+        self._question.setObjectName("overlay_question")
         self._question.setWordWrap(True)
         layout.addWidget(self._question)
 
@@ -245,8 +257,9 @@ class CheckinWindow(QWidget):
             # text: `choice.label` is a product string and the button must
             # read back exactly that.
             hint = QLabel(f"[{choice.key}]")
-            hint.setObjectName("label")
+            hint.setObjectName("overlay_caption")
             button = QPushButton(choice.label)
+            button.setObjectName("overlay_choice")
             # The window owns the keyboard; a focusable button would eat
             # space and return before `keyPressEvent` ever saw them.
             button.setFocusPolicy(Qt.NoFocus)
@@ -270,13 +283,13 @@ class CheckinWindow(QWidget):
         layout.addWidget(self._field_area)
 
         self._missing = QLabel()
-        self._missing.setObjectName("over")
+        self._missing.setObjectName("overlay_missing")
         self._missing.setVisible(False)
         layout.addWidget(self._missing)
 
         layout.addStretch(1)
         self._countdown = QLabel()
-        self._countdown.setObjectName("muted")
+        self._countdown.setObjectName("overlay_countdown")
         layout.addWidget(self._countdown)
 
     def _render_stage(self) -> None:
@@ -286,10 +299,11 @@ class CheckinWindow(QWidget):
         _clear(self._pick_layout)
         if picks is not None:
             lead = QLabel(PICK_LEAD)
-            lead.setObjectName("label")
+            lead.setObjectName("overlay_caption")
             self._pick_layout.addWidget(lead)
             for index, text in enumerate(picks, start=1):
                 button = QPushButton(f"{index}.  {text}")
+                button.setObjectName("overlay_pick")
                 button.setFocusPolicy(Qt.NoFocus)
                 button.clicked.connect(
                     lambda _checked=False, key=str(index): self.press(key)
@@ -303,14 +317,15 @@ class CheckinWindow(QWidget):
         if fields:
             for field in fields:
                 label = QLabel(field.label)
-                label.setObjectName("label")
+                label.setObjectName("overlay_caption")
                 self._field_layout.addWidget(label)
                 edit = QLineEdit()
+                edit.setObjectName("overlay_field")
                 edit.returnPressed.connect(self._submit_from_inputs)
                 self._field_layout.addWidget(edit)
                 self._field_inputs[field.name] = edit
             submit = QPushButton(SUBMIT_LABEL)
-            submit.setObjectName("primary")
+            submit.setObjectName("overlay_submit")
             submit.clicked.connect(self._submit_from_inputs)
             self._field_layout.addWidget(submit)
             next(iter(self._field_inputs.values())).setFocus()

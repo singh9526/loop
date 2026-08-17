@@ -40,7 +40,9 @@ QPushButton {
 }
 QPushButton:hover { border-color: %(accent)s; }
 QPushButton:disabled { color: %(dim)s; border-color: %(line)s; background: %(ink)s; }
-QPushButton#primary { background: %(accent)s; color: %(panel)s; border-color: %(accent)s; }
+QPushButton#primary, QPushButton#overlay_submit {
+    background: %(accent)s; color: %(panel)s; border-color: %(accent)s;
+}
 QPushButton#danger { color: %(crit)s; }
 QLineEdit, QPlainTextEdit {
     background: %(ink)s; border: 1px solid %(line)s; border-radius: 6px;
@@ -51,6 +53,25 @@ QFrame#banner { background: %(raised)s; border-left: 3px solid %(warn)s; border-
 QFrame#error { background: %(raised)s; border-left: 3px solid %(crit)s; border-radius: 4px; }
 QLabel#dead { color: %(dim)s; text-decoration: line-through; }
 QLabel#path { font-family: %(mono)s; color: %(muted)s; font-size: 11px; }
+
+/* The full-screen check-in. Read across a room, not across a desk: the
+   sizes are the ones `tk.py` used, the tokens and faces are the
+   dashboard's. Nothing above this line changes.
+
+   `#label` is deliberately not reused down here. It carries
+   `text-transform: uppercase`, which Qt honours (it sets the font's
+   capitalization), and every string in the overlay comes from
+   `app/checkin.py` and has to render exactly as written. */
+QLabel#overlay_title { color: %(dim)s; font-size: 18px; }
+QLabel#overlay_question { font-size: 32px; font-weight: 600; }
+QLabel#overlay_caption { color: %(dim)s; font-size: 18px; }
+QLabel#overlay_warning { font-size: 18px; }
+QLabel#overlay_missing { color: %(crit)s; font-size: 18px; }
+QLabel#overlay_countdown { color: %(muted)s; font-family: %(mono)s; font-size: 16px; }
+QPushButton#overlay_choice { font-size: 22px; padding: 8px 16px; }
+QPushButton#overlay_pick { font-size: 20px; padding: 8px 16px; }
+QPushButton#overlay_submit { font-size: 20px; padding: 8px 16px; }
+QLineEdit#overlay_field { font-family: %(mono)s; font-size: 20px; }
 """
 
 

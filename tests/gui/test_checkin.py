@@ -1,21 +1,29 @@
 """The full-screen check-in.
 
-Every test drives the window's own methods. None of them show it — `ask()`
-takes over the whole display for five minutes. The nested event loop is
-still exercised for real, through `_block_until_settled`, driven by
-zero-delay timers with nothing on screen.
+Most tests drive the window's own methods. The few that call `ask()` rely
+on `conftest.py` forcing QT_QPA_PLATFORM=offscreen, where `show()` draws
+into a buffer and no window exists — on a real platform `ask()` covers
+every display for five minutes, so that fixture is load-bearing, not
+hygiene.
+
+Every wait carries a watchdog: `pyproject.toml` sets no test timeout, so a
+regression that stops something settling would otherwise hang pytest
+forever instead of failing.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import time
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QKeyEvent
-from PySide6.QtWidgets import QFrame
+from PySide6.QtGui import QFont, QKeyEvent
+from PySide6.QtWidgets import QFrame, QLabel, QPushButton
 
 from loop.blockers.base import Choice, Prompt, TextField
-from loop.gui.checkin import CheckinWindow
+from loop.gui.checkin import CheckinWindow, QtBlocker
+
+WATCHDOG_MS = 2000
 
 
 class Clock:
@@ -57,12 +65,82 @@ def window(prompt, at=0.0):
     return CheckinWindow(prompt, mode="dark", now=lambda: at)
 
 
+def polished(view):
+    """Stylesheet-derived font properties do not exist until a polish.
+
+    Reading `font()` on an unpolished widget reports the application
+    default and quietly hides whatever the stylesheet is about to do to
+    it — which is how an uppercased title survived the first round of
+    tests.
+    """
+    view.ensurePolished()
+    for widget in view.findChildren(QLabel) + view.findChildren(QPushButton):
+        widget.ensurePolished()
+    return view
+
+
+def strings_on_screen(view):
+    return view.findChildren(QLabel) + view.findChildren(QPushButton)
+
+
+def watchdog(view, late):
+    """Break a wait that should already be over, and mark that it had to.
+
+    `view.settled.emit()` quits the nested loop from outside; `late`
+    records that nothing else did. The assertion on `late` is what turns
+    an infinite hang into a two-second failure.
+    """
+    timer = QTimer()
+    timer.setSingleShot(True)
+    timer.timeout.connect(lambda: (late.append(True), view.settled.emit()))
+    timer.start(WATCHDOG_MS)
+    return timer
+
+
 def test_the_prompt_text_reaches_the_screen_verbatim(qapp):
-    """These strings are the product. A window that paraphrases them is wrong."""
-    view = window(ping_prompt())
-    assert view.title_text() == "loop #3 · 18:42 / 45:00 · 2 paused"
-    assert view.question_text() == "hypothesis space smaller than 20m ago?"
+    """These strings are the product, read off the widgets rather than off
+    the `Prompt` the test just handed in — asserting the dataclass fields
+    proves only that Python assignment works.
+
+    A stylesheet that uppercases is a paraphrase: `QLabel#label` carries
+    `text-transform: uppercase`, Qt honours it as a font capitalization,
+    and the title rendered `LOOP #3 · 18:42 / 45:00 · 2 PAUSED`.
+    """
+    view = polished(window(ping_prompt()))
+    assert view._title.text() == "loop #3 · 18:42 / 45:00 · 2 paused"
+    assert view._question.text() == "hypothesis space smaller than 20m ago?"
     assert [button.text() for button in view.choice_buttons()] == ["yes", "no"]
+    assert view._title.font().capitalization() != QFont.AllUppercase
+    # The accessors and the widgets must not be able to disagree.
+    assert view.title_text() == view._title.text()
+    assert view.question_text() == view._question.text()
+
+
+def test_no_string_in_the_overlay_is_transformed_by_the_stylesheet(qapp):
+    """Every stage, not just the first: the `[y]` hints, the pick lead and
+    the field labels all wore `#label` too."""
+    revealed_picks = window(ping_prompt())
+    revealed_picks.press("y")
+    revealed_fields = window(p75_prompt())
+    revealed_fields.press("c")
+    for view in (revealed_picks, revealed_fields):
+        for widget in strings_on_screen(polished(view)):
+            assert widget.font().capitalization() != QFont.AllUppercase, widget.text()
+
+    assert "which died?" in [w.text() for w in strings_on_screen(revealed_picks)]
+    assert "new stop condition" in [w.text() for w in strings_on_screen(revealed_fields)]
+    assert "[y]" in [w.text() for w in strings_on_screen(revealed_picks)]
+
+
+def test_the_overlay_renders_at_display_sizes(qapp):
+    """Proof the object names reach the overlay rules — and the reason
+    they exist: 18px question text on a window covering the whole display
+    is not a check-in anyone reads."""
+    view = polished(window(ping_prompt()))
+    assert view._question.font().pixelSize() == 32
+    assert view._title.font().pixelSize() == 18
+    assert view._countdown.font().pixelSize() == 16
+    assert view.choice_buttons()[0].font().pixelSize() == 22
 
 
 def test_answering_no_completes_immediately(qapp):
@@ -136,6 +214,18 @@ def test_submitted_fields_complete_the_session(qapp):
     assert view.submit_fields({"new_stop_condition": "just the 500s"}) == []
     assert view.is_complete()
     assert view.answers().fields == {"new_stop_condition": "just the 500s"}
+
+
+def test_fields_submitted_when_none_were_asked_for_are_refused(qapp):
+    """`PromptSession.submit_fields` never checks its stage: on a ping
+    window it would take `{"junk": "value"}`, mark the session done and
+    settle it as a `ping_answered` with no choice at all. `session.py` is
+    shared with the CLI blockers until Task 15, so the door is shut here.
+    """
+    view = window(ping_prompt())
+    assert view.submit_fields({"junk": "value"}) == []
+    assert not view.is_complete()
+    assert view.result() is None
 
 
 def test_a_key_that_is_not_a_choice_does_nothing(qapp):
@@ -236,16 +326,24 @@ def test_the_wait_returns_when_the_answer_arrives(qapp):
     timer answers, `settled` quits the loop, and the outcome is readable
     the instant it returns."""
     view = window(ping_prompt())
+    late = []
+    guard = watchdog(view, late)
     QTimer.singleShot(0, lambda: view.press("n"))
     answers = view._block_until_settled()
+    guard.stop()
+    assert late == [], "the answer did not quit the loop; the watchdog did"
     assert answers.choice == "n"
     assert answers is view.result()
 
 
 def test_the_wait_returns_when_the_deadline_passes(qapp):
     view = window(ping_prompt())
+    late = []
+    guard = watchdog(view, late)
     QTimer.singleShot(0, view._expire)
     answers = view._block_until_settled()
+    guard.stop()
+    assert late == [], "the timeout did not quit the loop; the watchdog did"
     assert answers.timed_out is True
     assert answers is view.result()
 
@@ -267,3 +365,65 @@ def test_the_wait_does_not_block_when_the_answer_landed_first(qapp):
 
     assert late == [], "entered an event loop only the watchdog could break"
     assert answers.choice == "n"
+
+
+# --- the real ask(), offscreen ---
+
+
+def test_ask_reaches_the_wait_already_settled_when_the_deadline_has_passed(qapp):
+    """The ordering nothing else in this file can reach.
+
+    `ask()` arms the timers and the first tick expires the check-in, so
+    `_block_until_settled` is entered *already settled* — the exact case
+    guard (a) exists for. Every other test settles the window by hand
+    before the wait, which is the same state arrived at a different way.
+    Without guard (a) this hangs, on a window covering the whole display;
+    the watchdog makes that a failure instead.
+    """
+    view = CheckinWindow(dataclasses.replace(ping_prompt(), timeout_s=0.0), mode="dark")
+    settled_on_entry = []
+    wait = view._block_until_settled
+
+    def spy():
+        settled_on_entry.append(view.result() is not None)
+        return wait()
+
+    view._block_until_settled = spy
+    late = []
+    guard = watchdog(view, late)
+    answers = view.ask()
+    guard.stop()
+
+    assert settled_on_entry == [True], "the timers did not settle it before the wait"
+    assert late == [], "entered an event loop that was never going to be quit"
+    assert answers.timed_out is True
+    assert not view.isVisible()
+
+
+def test_the_blocker_runs_the_whole_window_and_returns_the_timeout(qapp):
+    """`QtBlocker.ask` end to end — show, timers, nested loop, teardown —
+    against a deadline short enough to sit in a test. The production
+    prompt keeps `TIMEOUT_S`; only this one shortens it."""
+    prompt = dataclasses.replace(ping_prompt(), timeout_s=0.05)
+    start = time.perf_counter()
+    answers = QtBlocker(mode="dark").ask(prompt)
+    assert time.perf_counter() - start < 30.0, "it waited on something else"
+    assert answers.timed_out is True
+    assert answers.choice is None
+    assert answers.answered_at - answers.shown_at >= 0.05
+
+
+def test_the_blocker_returns_the_answer_a_keystroke_gave_it(qapp):
+    """The same path, ending in an answer rather than a timeout: the
+    window has to be up and taking keys for this to settle at all."""
+    prompt = dataclasses.replace(ping_prompt(), timeout_s=30.0)
+    view = CheckinWindow(prompt, mode="dark")
+    late = []
+    guard = watchdog(view, late)
+    QTimer.singleShot(0, lambda: view.press("y"))
+    QTimer.singleShot(0, lambda: view.press("1"))
+    answers = view.ask()
+    guard.stop()
+    assert late == [], "the keystrokes never settled it"
+    assert (answers.choice, answers.picked) == ("y", 1)
+    assert not view.isVisible()
