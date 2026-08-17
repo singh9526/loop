@@ -400,6 +400,29 @@ def test_ask_reaches_the_wait_already_settled_when_the_deadline_has_passed(qapp)
     assert not view.isVisible()
 
 
+def test_the_deadline_timer_never_rounds_the_window_down(qapp):
+    """The deterministic half of the test below, which was flaky.
+
+    `int(remaining * 1000)` truncates, so a deadline landing on a
+    fractional millisecond fires *before* it: `_expire` runs early and
+    `answered_at - shown_at` comes back short of `timeout_s`. Measured
+    offscreen on this machine: 13 failures in 300 runs of the test below
+    with `int`, 0 in 300 with `math.ceil`. Rounding up overruns by at most
+    a millisecond; rounding down ends the check-in early, which is the one
+    direction that can be wrong.
+    """
+    clock = Clock(1000.0)
+    prompt = dataclasses.replace(ping_prompt(), timeout_s=0.0505)
+    view = CheckinWindow(prompt, mode="dark", now=clock)
+    view._start_timers()
+    try:
+        deadline = view._timers[0]
+        assert deadline.isSingleShot(), "the first timer is the deadline"
+        assert deadline.interval() >= prompt.timeout_s * 1000
+    finally:
+        view._stop_timers()
+
+
 def test_the_blocker_runs_the_whole_window_and_returns_the_timeout(qapp):
     """`QtBlocker.ask` end to end — show, timers, nested loop, teardown —
     against a deadline short enough to sit in a test. The production

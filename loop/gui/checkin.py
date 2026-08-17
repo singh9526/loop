@@ -17,6 +17,7 @@ platforms was worth more than an unbypassable block on one.
 
 from __future__ import annotations
 
+import math
 import time
 
 from PySide6.QtCore import QEventLoop, Qt, QTimer, Signal
@@ -353,7 +354,12 @@ class CheckinWindow(QWidget):
         deadline.setSingleShot(True)
         deadline.setTimerType(Qt.PreciseTimer)
         deadline.timeout.connect(self._expire)
-        deadline.start(max(0, int(self._remaining(self._now()) * 1000)))
+        # `ceil`, not `int`: truncating rounds the deadline *down*, so the
+        # timer can fire up to a millisecond before the check-in has
+        # actually run its full window and hand back an `answered_at` that
+        # is short of `shown_at + timeout_s`. Rounding up costs at most a
+        # millisecond of overrun and can never end the window early.
+        deadline.start(max(0, math.ceil(self._remaining(self._now()) * 1000)))
 
         tick = QTimer(self)
         tick.timeout.connect(self._tick)
