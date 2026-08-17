@@ -125,72 +125,123 @@ Confirm the trade actually looks the way the docstring claims:
 
 Task 17 audited every platform-dependent path by reading and by
 simulating `sys.platform`/`os.name` in tests — there is no Windows
-machine in that pass, so none of this has actually run. Work through
-this section on a real Windows box before calling Windows support done.
-Each item below is something specific the audit could not settle from
-macOS, not a vague "test on Windows" reminder.
+machine in that pass, so **none of the 13 items below has actually
+run.** Work through them in order on a real Windows box before calling
+Windows support done. Items 1–2 are the original build plan's own
+Step 1/Step 2, restated here as their own checklist entries rather than
+left implicit — a prior draft of this section dropped them, along with
+items 3 and 6, silently. The rest are specific things the audit could
+not settle from macOS, not a vague "test on Windows" reminder.
 
-- [ ] **Fonts** (`loop/gui/theme.py`). `Cascadia Mono` and `Segoe UI
-      Variable Text` must both resolve — check the clock/countdown
-      (`#clock`/`#overlay_countdown`, mono) and the body text (sans)
-      visually render in those faces, not a fallback. This matters more
-      than it looks: confirmed from this machine (platform-independent,
-      not a guess) that Qt's style-sheet engine does **not** implement
-      CSS's generic `monospace`/`sans-serif` keywords — they are the last
-      entries in both font stacks and are inert. If none of the named
-      faces resolve on a given Windows build, the fallback is not a
-      generic serif/sans-serif, it is Qt's default application font,
-      which need not be monospaced at all. `Consolas` and `Segoe UI`
-      (the two pre-Windows-11-safe entries) ship with every supported
-      Windows version, so this should not be reachable — confirming that
-      is the point of this item.
-- [ ] **Theme follows the OS setting.** Change Windows to light mode,
-      relaunch, confirm the palette follows (`detect_mode` reads
-      `QStyleHints.colorScheme()`, added in Qt 6.5; `pyproject.toml` pins
-      `PySide6>=6.6`, so the API should exist — never confirmed against
-      a real Windows light/dark toggle).
-- [ ] **Multi-monitor with mixed DPI.** `_cover_all_screens()` unions
-      `QGuiApplication.screens()` geometry — a Qt API, not
-      platform-specific code — but Windows commonly runs monitors at
-      different per-monitor scale factors (100%/150%/200%) in a way
-      macOS's Retina scaling does not typically mix on one desktop.
-      Confirm the check-in still covers every screen edge-to-edge with
-      no gap or overlap at the seam between differently-scaled monitors.
-- [ ] **Single-instance reclaim after a hard kill.** Start the app, kill
-      it from Task Manager (End Task, not a clean quit), then launch
-      again immediately. On POSIX a killed process can leave a stale
-      Unix-domain socket file that `loop/gui/instance.py`'s
-      `removeServer` + re-probe exists to clear. Windows named pipes are
-      released by the kernel when the owning process dies, with no
-      leftover pipe-file analogue — so this path is expected to rarely
-      or never actually execute there, and the next launch should
-      succeed on the first `listen()`. Confirm the reclaim is at least as
-      fast as on macOS, not slower or stuck.
-- [ ] **Check-in window in the taskbar / Alt-Tab.** Task 13 dropped
-      `Qt.Tool` in favour of `Qt.Window` specifically because macOS hides
-      `Qt.Tool` windows on app deactivation. Windows has no equivalent
-      auto-hide behaviour, but `Qt.Tool` on Windows also suppresses the
-      taskbar entry and Alt-Tab entry — so this window, being
-      `Qt.Window`, will show both there in a way it would not have under
-      `Qt.Tool`. Confirm that reads as acceptable (it does not affect
-      always-on-top or the once-a-second re-raise) rather than as a
-      surprise.
-- [ ] **No console flash on auto-launch.** `loop open` from a terminal
-      running `python.exe` (not `pythonw.exe`) calls
-      `launcher.ensure_running()`, which spawns
-      `[sys.executable, "-m", "loop.gui"]` with
-      `creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` instead
-      of POSIX's `start_new_session`. Confirm no black console window
-      flashes or lingers when the app auto-launches this way.
-- [ ] **Tray icon click behaviour.** Windows distinguishes left-click
-      (`Trigger`) from right-click (`Context`) more strictly than macOS
-      does; `Tray` in `loop/gui/tray.py` calls `window.surface()` on
-      *every* activation reason, including a right-click that is also
-      opening the context menu. Confirm this does not look broken (e.g.
-      the window popping up jarringly under the menu) on Windows.
-- [ ] **`%APPDATA%\loop`.** Confirm `loop_home()` resolves to the real
-      per-user roaming folder, including when the Windows username
-      contains a space or a non-ASCII character.
+1. [ ] **Install and run the automated suite on Windows.** Clean venv:
+       `pip install -e ".[gui,dev]"` then `python -m pytest -v`.
+       Expected: all pass. This is the first real confirmation that
+       anything below is even reachable — `tests/store/
+       test_lock_windows.py` and `tests/app/test_launcher.py`'s Windows
+       tests only ever ran *simulated* on macOS; this is where they run
+       for real.
+2. [ ] **`msvcrt.locking`'s real errno behaviour under contention.**
+       `loop/store/lock.py`'s Windows `_try_acquire` now catches only
+       `PermissionError` (Task 17's fix). That rests on Microsoft's
+       documented `_locking` errno list — `EACCES` on a non-blocking
+       contended lock, `EBADF` on a bad handle, `EDEADLOCK` only for the
+       blocking `LK_LOCK`/`LK_RLCK` modes this code does not use — never
+       executed. Confirm a second process's `LK_NBLCK` attempt on an
+       already-locked byte range really does raise `PermissionError`
+       (not some other `OSError`) on this Windows version/filesystem.
+3. [ ] **The two-process concurrency tests, through the real `msvcrt`
+       path.** `tests/store/test_lock.py::
+       test_concurrent_appends_do_not_interleave_or_vanish` and
+       `::test_a_held_lock_times_out_a_second_acquirer` spawn real
+       subprocesses and contain no platform branch of their own — they
+       run as part of item 1's full suite, but call them out
+       specifically: they are the ones that prove the lock actually
+       serializes writers under Windows locking, not just that
+       `_try_acquire` returns the right booleans in isolation.
+4. [ ] **`%APPDATA%\loop`.** Confirm `loop_home()` resolves to the real
+       per-user roaming folder, including when the Windows username
+       contains a space or a non-ASCII character.
+5. [ ] **Exercise the app end to end (brief's Step 2).**
+       ```powershell
+       $env:LOOP_HOME="$env:TEMP\loop-scratch"
+       python -m loop.gui
+       ```
+       The window opens and a tray icon appears in the notification
+       area; closing the window leaves the app running in the tray (see
+       "The dashboard and tray" above for the generic version of this
+       check — do it once here specifically on Windows, not just read
+       as already covered because the words match).
+6. [ ] **Second-instance hand-off, on real Windows named pipes.** A
+       second `python -m loop.gui` exits immediately and re-surfaces the
+       first window. `loop/gui/instance.py`'s `claim()`/`_probe()` logic
+       is platform-agnostic and its *decision logic* is tested (pinned
+       by `tests/gui/test_shell.py`), but real `QLocalServer`/
+       `QLocalSocket` named-pipe creation, connection, and teardown
+       timing on Windows was never exercised.
+7. [ ] **Fonts** (`loop/gui/theme.py`). `Cascadia Mono` and `Segoe UI
+       Variable Text` must both resolve — check the clock/countdown
+       (`#clock`/`#overlay_countdown`, mono) and the body text (sans)
+       visually render in those faces, not a fallback. This matters more
+       than it looks: confirmed from this machine (platform-independent,
+       not a guess) that Qt's style-sheet engine does **not** implement
+       CSS's generic `monospace`/`sans-serif` keywords — they are the
+       last entries in both font stacks and are inert. If none of the
+       named faces resolve on a given Windows build, the fallback is not
+       a generic serif/sans-serif, it is Qt's default application font,
+       which need not be monospaced at all. `Consolas` and `Segoe UI`
+       (the two pre-Windows-11-safe entries) ship with every supported
+       Windows version, so this should not be reachable — confirming
+       that is the point of this item.
+8. [ ] **Theme follows the OS setting.** Change Windows to light mode,
+       relaunch, confirm the palette follows (`detect_mode` reads
+       `QStyleHints.colorScheme()`, added in Qt 6.5; `pyproject.toml`
+       pins `PySide6>=6.6`, so the API should exist — never confirmed
+       against a real Windows light/dark toggle).
+9. [ ] **Multi-monitor with mixed DPI.** `_cover_all_screens()` unions
+       `QGuiApplication.screens()` geometry — a Qt API, not
+       platform-specific code — but Windows commonly runs monitors at
+       different per-monitor scale factors (100%/150%/200%) in a way
+       macOS's Retina scaling does not typically mix on one desktop.
+       Confirm the check-in still covers every screen edge-to-edge with
+       no gap or overlap at the seam between differently-scaled
+       monitors.
+10. [ ] **Single-instance reclaim after a hard kill.** Start the app,
+        kill it from Task Manager (End Task, not a clean quit), then
+        launch again immediately. On POSIX a killed process can leave a
+        stale Unix-domain socket file that `loop/gui/instance.py`'s
+        `removeServer` + re-probe exists to clear. Windows named pipes
+        are released by the kernel when the owning process dies, with
+        no leftover pipe-file analogue — so this path is expected to
+        rarely or never actually execute there, and the next launch
+        should succeed on the first `listen()`. Confirm the reclaim is
+        at least as fast as on macOS, not slower or stuck.
+11. [ ] **Check-in window in the taskbar / Alt-Tab.** Task 13 dropped
+        `Qt.Tool` in favour of `Qt.Window` specifically because macOS
+        hides `Qt.Tool` windows on app deactivation. Windows has no
+        equivalent auto-hide behaviour, but `Qt.Tool` on Windows also
+        suppresses the taskbar entry and Alt-Tab entry — so this
+        window, being `Qt.Window`, will show both there in a way it
+        would not have under `Qt.Tool`. Confirm that reads as
+        acceptable (it does not affect always-on-top or the
+        once-a-second re-raise) rather than as a surprise.
+12. [ ] **No console flash on auto-launch.** `loop open` from a
+        terminal running `python.exe` (not `pythonw.exe`) calls
+        `launcher.ensure_running()`, which spawns
+        `[sys.executable, "-m", "loop.gui"]` with
+        `creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`
+        instead of POSIX's `start_new_session`. Confirm no black
+        console window flashes or lingers when the app auto-launches
+        this way.
+13. [ ] **Tray icon click behaviour.** Windows distinguishes left-click
+        (`Trigger`) from right-click (`Context`) more strictly than
+        macOS does; `Tray` in `loop/gui/tray.py` calls
+        `window.surface()` on *every* activation reason, including a
+        right-click that is also opening the context menu. Confirm
+        this does not look broken (e.g. the window popping up jarringly
+        under the menu) on Windows.
+
+Then delete the scratch directory (`$env:LOOP_HOME`, item 5) the same
+way the generic checklist's own cleanup does below.
 
 ## Cleanup
 
