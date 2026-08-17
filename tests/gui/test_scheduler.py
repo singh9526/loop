@@ -7,7 +7,7 @@ from loop.blockers.fake import FakeBlocker
 from loop.gui import scheduler as scheduler_module
 from loop.gui.controller import Controller
 from loop.gui.scheduler import Scheduler
-from loop.store import jsonl
+from loop.store import jsonl, paths
 
 
 def answer(choice=None, picked=None, fields=None, timed_out=False):
@@ -62,6 +62,21 @@ def test_a_checkpoint_records_that_it_was_shown_before_asking(wired):
     Scheduler(controller, writer, blocker, now=lambda: clock[0]).tick()
     kinds = [event["type"] for event in log()]
     assert kinds.index("checkpoint_shown") < kinds.index("checkpoint_answered")
+
+
+def test_undecodable_bytes_stop_the_tick_instead_of_escaping_it(wired):
+    """`tick` catches `CorruptLogError` and nothing else. Damage that
+    arrives as a `UnicodeDecodeError` used to propagate out of a QTimer
+    callback — check-ins stop, and PySide6 swallows the traceback."""
+    clock, writer, controller = wired
+    open_one(writer)
+    clock[0] = 1200.0  # a ping is due
+    with paths.events_path().open("ab") as handle:
+        handle.write(b'{"type":"ping_\xff\xfeanswered"}\n')
+
+    blocker = FakeBlocker([answer(choice="n")])
+    Scheduler(controller, writer, blocker, now=lambda: clock[0]).tick()  # must not raise
+    assert blocker.prompts == [], "nothing may be appended to a log we cannot fold"
 
 
 def test_a_scheduler_with_no_active_loop_does_nothing(wired):
