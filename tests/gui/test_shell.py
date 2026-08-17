@@ -124,6 +124,105 @@ def test_main_exits_zero_silently_when_another_copy_is_running(qapp, monkeypatch
     assert capsys.readouterr().err == ""
 
 
+def test_main_wires_the_whole_app_up_and_starts_the_scheduler(qapp, monkeypatch):
+    """The happy path of `main()`, which nothing else reaches: both tests
+    above short-circuit at `claim`.
+
+    Deleting `scheduler.start()` left every other test in this suite green
+    while shipping an app that opens loops and then never interrupts you —
+    which is the entire product. Nothing asserted the `Scheduler` got the
+    process's one `Writer`, or that a single one of the five signal
+    connections below existed. `QApplication.exec` is stubbed, so this
+    drives everything up to (and not including) the event loop.
+    """
+    from PySide6.QtNetwork import QLocalServer
+    from PySide6.QtWidgets import QApplication
+
+    import loop.gui.__main__ as gui_main
+    from loop.gui.checkin import QtBlocker
+
+    # A real QLocalServer that never listens: `main` only connects to its
+    # `newConnection`, and binding a name here would fight the real guard.
+    server = QLocalServer()
+    monkeypatch.setattr(instance, "claim", lambda app: server)
+    monkeypatch.setattr(QApplication, "exec", lambda self: 0)
+
+    built = {}
+
+    def spy(name, factory):
+        def make(*args, **kwargs):
+            built[name] = factory(*args, **kwargs)
+            return built[name]
+        return make
+
+    for name, attribute in (("controller", "Controller"), ("window", "MainWindow"),
+                            ("tray", "Tray"), ("scheduler", "Scheduler")):
+        monkeypatch.setattr(gui_main, attribute,
+                            spy(name, getattr(gui_main, attribute)))
+
+    # Patched on the class in its own module: the spy above replaced the
+    # *name* `gui_main.Tray`, not the class it still calls.
+    from loop.gui import tray as tray_module
+
+    burns = []
+    monkeypatch.setattr(tray_module.Tray, "set_burn",
+                        lambda self, fraction: burns.append(fraction))
+    postmortems = []
+    monkeypatch.setattr("loop.gui.dialogs.lifecycle.CloseDialog",
+                        lambda parent: postmortems.append(parent) or _NoDialog())
+
+    stylesheet = qapp.styleSheet()
+    try:
+        assert gui_main.main(argv=[]) == 0
+
+        controller = built["controller"]
+        window = built["window"]
+        scheduler = built["scheduler"]
+
+        # The scheduler is running, on the app's one writer, drawing Qt.
+        assert scheduler._timer.isActive(), "the app would never interrupt anyone"
+        assert scheduler._writer is controller.writer
+        assert scheduler._controller is controller
+        assert isinstance(scheduler._blocker, QtBlocker)
+
+        # controller.changed -> window.bind, and -> tray.set_burn
+        assert window._dashboard is controller.view
+        assert window._actions["open"].isEnabled()
+        assert not window._actions["close"].isEnabled()
+        assert burns == [None], "the tray dot must follow the view too"
+
+        # scheduler.report -> window.show_report
+        scheduler.report.emit("error", "could not be saved")
+        assert window._report.text() == "could not be saved"
+
+        # scheduler.busy_changed -> the window's and the tray's lockouts
+        scheduler.busy_changed.emit(True)
+        assert not any(action.isEnabled() for action in window._actions.values())
+        assert built["tray"]._checkin_active is True
+        scheduler.busy_changed.emit(False)
+        assert window._actions["open"].isEnabled()
+
+        # scheduler.postmortem -> the close dialog
+        scheduler.postmortem.emit()
+        assert postmortems == [window], "p100's `stop now` must open the postmortem"
+
+        # server.newConnection -> the second launch's hand-off
+        window.hide()
+        server.newConnection.emit()
+        assert window.isVisible(), "a second launch must surface the first window"
+    finally:
+        built["scheduler"].stop()
+        built["controller"].stop()
+        built["window"].close()
+        server.close()
+        qapp.setStyleSheet(stylesheet)
+
+
+class _NoDialog:
+    def values(self):
+        return None
+
+
 def test_closing_the_window_hides_it_instead_of_quitting(qapp):
     from PySide6.QtGui import QCloseEvent
     from loop.gui.window import MainWindow
