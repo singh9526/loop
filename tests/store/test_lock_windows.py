@@ -9,11 +9,36 @@ after `lock` is already imported has no effect on `_try_acquire`/
 module loaded and stay that way for the rest of the process.
 
 The only way to exercise the Windows branch from here is to fake
-`msvcrt`, set `sys.platform`, and *reload* `loop.store.lock` so the
-top-level `if` runs again — then reload it back to the real platform
-before the test ends, in a bare `finally`, so a failing assertion still
-leaves every later test in the session looking at the real POSIX
-implementation instead of a module stuck pretending to be on Windows.
+`msvcrt`, set `sys.platform`, and load a fresh copy of the module's code
+so the top-level `if` runs again with those in place.
+
+**That fresh copy is loaded into its own throwaway module object,
+never into `sys.modules['loop.store.lock']`.** An earlier version of
+this fixture used `importlib.reload()` on the *real* module instead —
+which re-executes `class LockTimeout(Exception): ...` in place, handing
+back a brand-new class object every time. `loop/gui/actions.py` and
+`loop/gui/scheduler.py` both do `from loop.store.lock import
+LockTimeout` — a frozen name binding, taken once at their own import
+time. Reloading the real module after that binding exists does not
+update it: `raise LockTimeout(...)` inside a reloaded `lock.py`
+constructs an instance of the *new* class, while `actions.py`'s `except
+LockTimeout:` still checks against the *old* one — and stops catching
+it, silently. Restoring `sys.platform` and reloading *again* afterwards
+does not fix this either; it just produces a *third* class object,
+still different from whatever `actions.py`/`scheduler.py` are holding.
+Today's alphabetical test collection order (`tests/gui` before
+`tests/store`) happened to import those two modules before this file's
+reload ever ran, so nothing observed the mismatch — which is exactly
+the kind of thing that breaks the moment collection order changes
+(a subset run, a random-order plugin, ...). See
+`test_the_simulation_never_touches_the_real_modules_identity` below,
+and `tests/gui/test_lock_windows_identity.py`, which pins the
+`actions.py`/`scheduler.py` side directly.
+
+Loading into a throwaway module object sidesteps the whole class of
+problem: `sys.modules['loop.store.lock']` — and every class already
+bound out of it, anywhere in the process — is never touched, regardless
+of what order tests run in.
 
 This proves the *decision logic* — which exception is contention and
 which is a genuine fault — behaves as intended when Python's own errno
@@ -27,14 +52,14 @@ conditions — that is unverified; see the Task 17 report.
 from __future__ import annotations
 
 import errno
-import importlib
+import importlib.util
 import sys
 import time
 import types
 
 import pytest
 
-from loop.store import lock as lock_module
+from loop.store import lock as real_lock
 
 
 class _FakeHandle:
@@ -52,39 +77,50 @@ class _FakeHandle:
         self.seeks.append(offset)
 
 
-@pytest.fixture
-def win32_lock():
-    """Reload `loop.store.lock` as if imported on Windows, with a fake
-    `msvcrt` whose `locking()` is scripted per test via `fake.raises` /
-    `fake.locking`."""
-    original_platform = sys.platform
-    original_msvcrt = sys.modules.get("msvcrt")
-
-    fake_msvcrt = types.ModuleType("msvcrt")
-    fake_msvcrt.LK_NBLCK = 2
-    fake_msvcrt.LK_UNLCK = 0
-    fake_msvcrt.calls = []
-    fake_msvcrt.raises = None  # an exception instance, or None to succeed
+def _fake_msvcrt() -> types.ModuleType:
+    fake = types.ModuleType("msvcrt")
+    fake.LK_NBLCK = 2
+    fake.LK_UNLCK = 0
+    fake.calls = []
+    fake.raises = None  # an exception instance, or None to succeed
 
     def locking(fd, mode, nbytes):
-        fake_msvcrt.calls.append((fd, mode, nbytes))
-        if fake_msvcrt.raises is not None:
-            raise fake_msvcrt.raises
+        fake.calls.append((fd, mode, nbytes))
+        if fake.raises is not None:
+            raise fake.raises
 
-    fake_msvcrt.locking = locking
+    fake.locking = locking
+    return fake
 
+
+def _load_windows_lock(fake_msvcrt: types.ModuleType):
+    """Execute `loop/store/lock.py`'s code into a fresh, independent
+    module object — not `sys.modules['loop.store.lock']` — with
+    `sys.platform`/`msvcrt` patched only for the duration of this one
+    `exec_module` call. The real module, and every reference anyone else
+    in the process already holds into it, is never touched."""
+    spec = importlib.util.find_spec("loop.store.lock")
+    module = importlib.util.module_from_spec(spec)
+    original_platform = sys.platform
+    original_msvcrt = sys.modules.get("msvcrt")
     sys.platform = "win32"
     sys.modules["msvcrt"] = fake_msvcrt
-    importlib.reload(lock_module)
     try:
-        yield lock_module, fake_msvcrt
+        spec.loader.exec_module(module)
     finally:
         sys.platform = original_platform
         if original_msvcrt is None:
             sys.modules.pop("msvcrt", None)
         else:
             sys.modules["msvcrt"] = original_msvcrt
-        importlib.reload(lock_module)
+    return module
+
+
+@pytest.fixture
+def win32_lock():
+    fake = _fake_msvcrt()
+    module = _load_windows_lock(fake)
+    yield module, fake
 
 
 def test_the_fixture_really_engages_the_msvcrt_branch(win32_lock):
@@ -93,6 +129,37 @@ def test_the_fixture_really_engages_the_msvcrt_branch(win32_lock):
     mod, fake = win32_lock
     assert mod._try_acquire(_FakeHandle(fd=3)) is True
     assert fake.calls == [(3, fake.LK_NBLCK, 1)]
+
+
+def test_the_simulation_never_touches_the_real_modules_identity():
+    """The hazard the module docstring describes, made concrete and
+    checked directly rather than trusted. This is the test that would
+    have failed against the fixture's previous `importlib.reload()`
+    implementation: reloading the real module rebinds `LockTimeout` (and
+    every function) to new objects, so `real_lock.LockTimeout is before`
+    below would already be false immediately after the simulation runs.
+
+    See `tests/gui/test_lock_windows_identity.py` for the same guarantee
+    checked from the consuming side — `loop.gui.actions`/`scheduler`'s
+    own bound `LockTimeout` reference — which needs PySide6 and so
+    cannot live in this file."""
+    before_platform = sys.platform
+    before_msvcrt = sys.modules.get("msvcrt")
+    before_timeout_cls = real_lock.LockTimeout
+    before_try_acquire = real_lock._try_acquire
+    before_release = real_lock._release
+
+    fake = _fake_msvcrt()
+    fake.raises = PermissionError(errno.EACCES, "already locked")
+    simulated = _load_windows_lock(fake)
+    assert simulated is not real_lock  # a genuinely separate module object
+    assert simulated._try_acquire(_FakeHandle()) is False  # actually run, not just loaded
+
+    assert sys.platform == before_platform
+    assert sys.modules.get("msvcrt") is before_msvcrt
+    assert real_lock.LockTimeout is before_timeout_cls
+    assert real_lock._try_acquire is before_try_acquire
+    assert real_lock._release is before_release
 
 
 def test_lock_contention_is_retried_not_raised(win32_lock):
