@@ -4,29 +4,39 @@ Binds to `DashboardView` and nothing else — every string and every
 enabled/disabled decision was made in `loop.app.view`; this module only
 places widgets and copies fields onto them. It also hosts the logbook
 (`loop.gui.logbook.LogbookView`) as a second page of the same central
-stack, toggled by a menu action and a button next to the status strip —
-that page binds itself; this module only switches to it.
+stack, toggled by a menu action and a button in the status strip — that
+page binds itself; this module only switches to it.
+
+The vertical order is the design's `.win`: toolbar, error notice, the
+instrument head (stack, stop-when, meter), the thrash banner, the two
+columns, the status strip. Every layout sets its margins and spacing
+explicitly; Qt's 9px/6px defaults are the design's rhythm nowhere.
 """
 
 from __future__ import annotations
 
 from dataclasses import replace
 
-from PySide6.QtGui import QAction
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QMainWindow, QPushButton, QStackedWidget, QToolBar,
+    QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton, QStackedWidget,
     QVBoxLayout, QWidget,
 )
 
 from loop.app.view import ALL_ACTIONS, DashboardView
+from loop.core.timefmt import format_mmss
 from loop.gui.actions import Actions
 from loop.gui.logbook import LogbookView
 from loop.gui.widgets import (
-    ActionLog, BurnMeter, ErrorBanner, HypothesisList, StackBar, StatusStrip,
-    ThrashBanner,
+    ActionLog, BurnMeter, ErrorBanner, HypothesisList, MeterScale, StackBar,
+    StatusStrip, ThrashBanner, ToolButton,
 )
 
 MIN_SIZE = (720, 560)
+
+# The design's `.cols` is `minmax(0, 5fr) minmax(0, 6fr)`, not a half.
+COLUMN_STRETCH = (5, 6)
 
 # Order is presentation only — ALL_ACTIONS itself is unordered. The
 # assertion below keeps this table honest if view.py ever adds or
@@ -47,7 +57,35 @@ ACTION_LABELS = {
     "close": "Close Loop…",
     "abandon": "Abandon Loop…",
 }
+
+# The toolbar's own order and grouping, which is the design's and not the
+# menu's: the actions that work *on* the loop, then `.gap`
+# (`margin-left: auto`), then the four that change its shape or end it.
+#
+# `hyp_kill` and `resume` are absent on purpose — the design reaches both
+# from the row they apply to, where the id is already known, and both are
+# still in the menu bar. Ten of these labels do not fit a 720px window
+# side by side, and the labels are product strings that cannot be
+# shortened to make them.
+TOOLBAR_GAP = None
+TOOLBAR_ORDER = (
+    "open", "try", "hyp_add", "pause",
+    TOOLBAR_GAP,
+    "cut", "extend", "close", "abandon",
+)
+TOOLBAR_VARIANTS = {
+    "open": "btn", "try": "btn_primary", "hyp_add": "btn",
+    "pause": "btn_ghost", "cut": "btn_ghost",
+    "extend": "btn_ghost", "close": "btn", "abandon": "btn_danger",
+}
+# The two the design puts a `.k` chip on. A chip has to name a shortcut
+# that exists, so these are bound on the QAction as well — which also
+# puts them in the menu, where they are reachable without the toolbar.
+SHORTCUTS = {"try": "Ctrl+Shift+A", "open": "Ctrl+Shift+N"}
+
 assert set(ACTION_ORDER) == ALL_ACTIONS == set(ACTION_LABELS)
+assert set(TOOLBAR_ORDER) - {TOOLBAR_GAP} == set(TOOLBAR_VARIANTS) <= ALL_ACTIONS
+assert set(SHORTCUTS) <= ALL_ACTIONS
 
 
 class MainWindow(QMainWindow):
@@ -56,6 +94,7 @@ class MainWindow(QMainWindow):
         self._controller = controller
         self._mode = mode
         self._actions: dict[str, QAction] = {}
+        self._buttons: dict[str, QPushButton] = {}
         self._dashboard: DashboardView | None = None
         self._checkin_active = False
         # `controller` is `None` in the clock-only tests (test_window.py) —
@@ -93,37 +132,23 @@ class MainWindow(QMainWindow):
 
     def _build(self) -> None:
         central = QWidget(self)
+        central.setObjectName("page")
         layout = QVBoxLayout(central)
+        # The `.win` has no padding of its own: every band inside it owns
+        # its gutter, so the banners and the strip can run edge to edge.
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
         self._toolbar = self._build_toolbar()
-        self._clock = QLabel("—")
-        self._clock.setObjectName("clock")
-        self._meter = BurnMeter(self._mode)
-        self._stack = StackBar()
-        self._hypotheses = HypothesisList()
-        self._log = ActionLog()
-        self._thrash = ThrashBanner()
         self._error = ErrorBanner()
-        self._strip = StatusStrip()
-        self._report = QLabel()
-        self._report.setObjectName("muted")
-        self._report.setWordWrap(True)
-        self._report.setVisible(False)
-        for widget in (self._toolbar, self._error, self._stack, self._clock,
-                       self._meter, self._thrash):
-            layout.addWidget(widget)
-        columns = QHBoxLayout()
-        columns.addWidget(self._hypotheses, 1)
-        columns.addWidget(self._log, 1)
-        layout.addLayout(columns)
-
-        strip_row = QHBoxLayout()
-        strip_row.addWidget(self._strip, 1)
-        self._logbook_button = QPushButton("Logbook")
-        self._logbook_button.clicked.connect(lambda checked=False: self._toggle_logbook())
-        strip_row.addWidget(self._logbook_button)
-        layout.addLayout(strip_row)
-
-        layout.addWidget(self._report)
+        self._thrash = ThrashBanner()
+        layout.addWidget(self._toolbar)
+        layout.addWidget(self._error)
+        layout.addWidget(self._build_head())
+        layout.addWidget(self._thrash)
+        layout.addWidget(self._build_columns(), 1)
+        layout.addWidget(self._build_strip())
+        layout.addWidget(self._build_report())
 
         # The dashboard and the logbook are two pages of one stack, not two
         # calls to `setCentralWidget` — `QMainWindow` deletes whatever
@@ -136,18 +161,23 @@ class MainWindow(QMainWindow):
         self._pages.addWidget(self._logbook)
         self.setCentralWidget(self._pages)
 
-    def _build_toolbar(self) -> QToolBar:
+    def _build_toolbar(self) -> QFrame:
         """A plain widget row placed by the central layout, not a
         dockable QMainWindow toolbar — this app has exactly one and it
         does not move. Every action is added to the menu bar too, so
         nothing here is reachable only by mouse."""
-        toolbar = QToolBar(self)
-        toolbar.setMovable(False)
-        toolbar.setFloatable(False)
+        toolbar = QFrame(self)
+        toolbar.setObjectName("toolbar")
+        row = QHBoxLayout(toolbar)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(7)  # .toolbar { gap: 7px }
+
         menu = self.menuBar().addMenu("&Actions")
         for name in ACTION_ORDER:
             action = QAction(ACTION_LABELS[name], self)
             action.setObjectName(name)
+            if name in SHORTCUTS:
+                action.setShortcut(QKeySequence(SHORTCUTS[name]))
             # `Actions.run` takes the CLI-style name, not a target id — the
             # right entry point here, since a `QAction` never carries one.
             # `hyp_kill` and `resume` resolve the id themselves (asking, or
@@ -155,9 +185,19 @@ class MainWindow(QMainWindow):
             # row controls that *do* have an id bypass `run` and call
             # `run_hyp_kill`/`run_resume` directly (wired in `__init__`).
             action.triggered.connect(lambda checked=False, n=name: self._trigger(n))
-            toolbar.addAction(action)
             menu.addAction(action)
             self._actions[name] = action
+
+        for name in TOOLBAR_ORDER:
+            if name is TOOLBAR_GAP:
+                row.addStretch(1)  # .toolbar .gap { margin-left: auto }
+                continue
+            action = self._actions[name]
+            chip = action.shortcut().toString(QKeySequence.NativeText) or None
+            button = ToolButton(ACTION_LABELS[name], TOOLBAR_VARIANTS[name], chip)
+            button.clicked.connect(lambda checked=False, n=name: self._trigger(n))
+            row.addWidget(button)
+            self._buttons[name] = button
 
         # A second menu for the read-only view toggle — not one of the ten
         # `ALL_ACTIONS`, so it does not go through `Actions.run`: there is
@@ -167,6 +207,106 @@ class MainWindow(QMainWindow):
         self._logbook_action.triggered.connect(lambda checked=False: self._toggle_logbook())
         view_menu.addAction(self._logbook_action)
         return toolbar
+
+    def _build_head(self) -> QFrame:
+        """`.head` — the stack, the stop condition, and the meter."""
+        head = QFrame(self)
+        head.setObjectName("head")
+        column = QVBoxLayout(head)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(14)  # .head { gap: 14px }
+
+        self._stack = StackBar(self._mode)
+        column.addWidget(self._stack)
+
+        self._stop = QFrame()
+        self._stop.setObjectName("stop")
+        stop_row = QHBoxLayout(self._stop)
+        stop_row.setContentsMargins(0, 0, 0, 0)
+        stop_row.setSpacing(9)  # .stop { gap: 9px }
+        stop_label = QLabel("stop when")
+        stop_label.setObjectName("label")
+        stop_row.addWidget(stop_label)
+        self._stop_value = QLabel()
+        self._stop_value.setObjectName("stop_value")
+        stop_row.addWidget(self._stop_value, 1)
+        column.addWidget(self._stop)
+
+        column.addWidget(self._build_meter())
+        return head
+
+    def _build_meter(self) -> QFrame:
+        """`.meter` — the `.mtop` clock row, the track, and the `.scale`."""
+        meter = QFrame(self)
+        meter.setObjectName("meter")
+        column = QVBoxLayout(meter)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(7)  # .meter { gap: 7px }
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(12)  # .mtop { gap: 12px }
+        self._clock = QLabel("—")
+        self._clock.setObjectName("clock")
+        # `.clock` and its `.of` suffix are one string in `_clock_text` and
+        # two labels here, because the suffix is 15px dim against the
+        # clock's 25px. `_clock_parts` guarantees they still concatenate
+        # to exactly what `_clock_text` returns.
+        self._clock_of = QLabel()
+        self._clock_of.setObjectName("clock_of")
+        top.addWidget(self._clock, 0, Qt.AlignBottom)
+        top.addWidget(self._clock_of, 0, Qt.AlignBottom)
+        top.addStretch(1)
+        self._mright = QLabel("next check-in")
+        self._mright.setObjectName("mright")
+        self._mright_value = QLabel()
+        self._mright_value.setObjectName("mright_value")
+        top.addWidget(self._mright, 0, Qt.AlignBottom)
+        top.addWidget(self._mright_value, 0, Qt.AlignBottom)
+        column.addLayout(top)
+
+        self._meter = BurnMeter(self._mode)
+        column.addWidget(self._meter)
+        self._scale = MeterScale()
+        column.addWidget(self._scale)
+        return meter
+
+    def _build_columns(self) -> QFrame:
+        """`.cols` — 5fr / 6fr, a hairline between them and one above."""
+        columns = QFrame(self)
+        columns.setObjectName("cols")
+        row = QHBoxLayout(columns)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)  # the `border-left` is the only separation
+        self._hypotheses = HypothesisList(self._mode)
+        self._log = ActionLog()
+        row.addWidget(self._hypotheses, COLUMN_STRETCH[0])
+        row.addWidget(self._log, COLUMN_STRETCH[1])
+        return columns
+
+    def _build_strip(self) -> StatusStrip:
+        self._strip = StatusStrip(self._mode)
+        self._logbook_button = QPushButton("Logbook")
+        self._logbook_button.setObjectName("btn_sm")
+        self._logbook_button.clicked.connect(lambda checked=False: self._toggle_logbook())
+        self._strip.add_trailing(self._logbook_button)
+        return self._strip
+
+    def _build_report(self) -> QFrame:
+        """Not a design element: where `Actions.report` and the scheduler
+        surface an outcome. Hidden until there is one."""
+        frame = QFrame(self)
+        frame.setObjectName("report")
+        row = QHBoxLayout(frame)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        self._report = QLabel()
+        self._report.setObjectName("muted")
+        self._report.setWordWrap(True)
+        row.addWidget(self._report)
+        self._report_frame = frame
+        frame.setVisible(False)
+        return frame
 
     def set_checkin_active(self, active: bool) -> None:
         """Refuse every action while a check-in owns the screen.
@@ -244,13 +384,41 @@ class MainWindow(QMainWindow):
         if self._checkin_active:
             dashboard = replace(dashboard, enabled_actions=frozenset())
         for name, action in self._actions.items():
-            action.setEnabled(name in dashboard.enabled_actions)
-        self._clock.setText(_clock_text(dashboard))
+            enabled = name in dashboard.enabled_actions
+            action.setEnabled(enabled)
+            button = self._buttons.get(name)
+            if button is not None:
+                button.setEnabled(enabled)
+
+        head, tail = _clock_parts(dashboard)
+        self._clock.setText(head)
+        self._clock_of.setText(tail)
         self._set_clock_over(dashboard.meter is not None and dashboard.meter.over_s > 0.0)
+        self._bind_stop(dashboard)
+        self._bind_next_checkin(dashboard)
         self._meter.set_meter(dashboard.meter)
+        self._scale.set_meter(dashboard.meter)
         for panel in (self._stack, self._hypotheses, self._log,
                       self._thrash, self._error, self._strip):
             panel.bind(dashboard)
+
+    def _bind_stop(self, dashboard: DashboardView) -> None:
+        """`.stop` — the condition that ends the loop. It has been in
+        `DashboardView` since the view model was written and was never
+        drawn."""
+        self._stop.setVisible(dashboard.stop_condition is not None)
+        self._stop_value.setText(dashboard.stop_condition or "")
+
+    def _bind_next_checkin(self, dashboard: DashboardView) -> None:
+        """`.mright` — `next check-in 3:12`, in seconds, beside the clock.
+        The strip carries the same number rounded to minutes; the design
+        shows both, and this is the one you watch."""
+        meter = dashboard.meter
+        pending = meter is not None and meter.next_checkin_s is not None
+        self._mright.setVisible(pending)
+        self._mright_value.setVisible(pending)
+        if pending:
+            self._mright_value.setText(format_mmss(meter.next_checkin_s))
 
     def _set_clock_over(self, over: bool) -> None:
         """State lives in the object name, not in the text — `theme.py`'s
@@ -275,18 +443,24 @@ class MainWindow(QMainWindow):
         surface a message the same way `Actions.report` does — the
         scheduler's `report` signal (an answer that survived every retry
         but still could not be written), for one. Kept separate from
-        `_on_report` so the rendering logic — styled `#muted` vs `#over` —
-        has exactly one owner regardless of who is reporting."""
+        `_on_report` so the rendering logic — styled `#muted` vs
+        `#report_error` — has exactly one owner regardless of who is
+        reporting."""
         self._on_report(kind, text)
 
     def _on_report(self, kind: str, text: str) -> None:
         """`Actions.report` lands here. `"stale"` reads as `#muted` — the
         outcome the user wanted already happened, so it is not styled as a
-        problem — and `"error"` as `#over`, the same crit colour the clock
-        uses when the loop runs long."""
+        problem — and `"error"` as `#report_error`, the same crit colour
+        the clock uses when the loop runs long.
+
+        Not `#over`, which the clock also uses: that rule carries the
+        clock's 25px mono face, and a sentence of prose set in it is a
+        headline, not a message.
+        """
         self._report.setText(text)
-        self._report.setVisible(bool(text))
-        self._set_report_style("over" if kind == "error" else "muted")
+        self._report_frame.setVisible(bool(text))
+        self._set_report_style("report_error" if kind == "error" else "muted")
 
     def _set_report_style(self, name: str) -> None:
         """Same gotcha as `_set_clock_over`: an `objectName` change on an
@@ -300,20 +474,22 @@ class MainWindow(QMainWindow):
         style.polish(self._report)
 
 
-def _mmss(seconds: float) -> str:
-    total = max(0, int(seconds))
-    minutes, secs = divmod(total, 60)
-    return f"{minutes}:{secs:02d}"
-
-
 def _clock_text(dashboard: DashboardView) -> str:
     """Plain text only — colour for the over-budget state comes from
     `objectName` + the stylesheet, never from markup in the string."""
+    head, tail = _clock_parts(dashboard)
+    return head + tail
+
+
+def _clock_parts(dashboard: DashboardView) -> tuple[str, str]:
+    """The clock split where the design changes size: `18:42` at 25px and
+    ` / 45:00` at 15px dim. Concatenated they are `_clock_text`, which is
+    what the window used to set on a single label."""
     meter = dashboard.meter
     if meter is None:
-        return "—"
-    elapsed = _mmss(meter.elapsed_s)
-    budget = _mmss(meter.budget_s)
+        return "—", ""
+    elapsed = format_mmss(meter.elapsed_s)
+    budget = format_mmss(meter.budget_s)
     if meter.over_s > 0.0:
-        return f"{elapsed} / {budget} · over by {_mmss(meter.over_s)}"
-    return f"{elapsed} / {budget}"
+        return elapsed, f" / {budget} · over by {format_mmss(meter.over_s)}"
+    return elapsed, f" / {budget}"
