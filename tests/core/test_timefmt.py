@@ -1,6 +1,8 @@
 import pytest
 
-from loop.core.timefmt import format_duration, parse_duration
+from loop.core.timefmt import (
+    format_clock, format_duration, format_mmss, parse_duration,
+)
 
 
 @pytest.mark.parametrize(
@@ -39,3 +41,33 @@ def test_parse_duration_rejects_garbage(text):
 )
 def test_format_duration(seconds, expected):
     assert format_duration(seconds) == expected
+
+
+@pytest.mark.parametrize(
+    "seconds,expected",
+    [
+        (0.0, "0:00"),
+        (9.0, "0:09"),
+        (59.9, "0:59"),
+        (60.0, "1:00"),
+        (1122.0, "18:42"),
+        (2700.0, "45:00"),
+        (-5.0, "0:00"),         # a negative remainder is zero, not "-1:55"
+    ],
+)
+def test_format_mmss(seconds, expected):
+    """The burn clock's own format. `format_duration` rounds to whole
+    minutes, which is the wrong resolution for something you watch."""
+    assert format_mmss(seconds) == expected
+
+
+def test_format_clock_is_local_wall_time_to_the_minute():
+    """The action log's left column. Asserted against `time.localtime` in
+    the running process's own zone, because that is the point — a UTC
+    timestamp beside a wall clock is a bug the user reads as a bug."""
+    import time
+
+    ts = 1_700_000_000.0
+    expected = time.strftime("%H:%M", time.localtime(ts))
+    assert format_clock(ts) == expected
+    assert len(format_clock(ts)) == 5 and format_clock(ts)[2] == ":"

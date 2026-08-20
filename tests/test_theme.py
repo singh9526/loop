@@ -30,15 +30,60 @@ def test_an_unknown_mode_refuses_rather_than_rendering_half_a_theme():
 
 
 def test_the_overlay_scale_leaves_the_dashboard_scale_alone():
-    """`theme.py` is shared. Task 11's over-budget clock reads `#clock`'s
-    26px and the dashboard question is 18px; the check-in's display sizes
-    must not have leaked into either."""
+    """`theme.py` is shared. The over-budget clock reads `#clock`'s size
+    and the logbook's match headers read `#question`'s; the check-in's
+    display sizes must not have leaked into either.
+
+    `#clock` is 25px, not the 26px this pinned before: the design's
+    `.clock` is 25px and the app had been built from a description of it.
+    Weight goes with it — the design sets none, so the clock is regular.
+    """
     qss = theme.stylesheet("dark")
     assert "QLabel#question { font-size: 18px; font-weight: 600; }" in qss
     assert "QLabel#clock, QLabel#over { font-family:" in qss
-    assert "font-size: 26px; font-weight: 600; }" in qss
+    assert "font-size: 25px; }" in qss
     assert "font-size: 10px; letter-spacing: 1px; text-transform: uppercase; }" in qss
     assert "QLabel#overlay_question { font-size: 32px; font-weight: 600; }" in qss
+
+
+def test_the_meter_ramp_is_its_own_trio_in_both_modes():
+    """The design carries `--meter-cool/warm/hot` separately from
+    accent/warn/crit. They coincide in dark, which is why substituting the
+    status colours for them passed unnoticed — and are three different
+    values in light, where the substitution was simply wrong."""
+    light, dark = theme.TOKENS["light"], theme.TOKENS["dark"]
+    assert (light["meter_cool"], light["meter_warm"], light["meter_hot"]) == (
+        "#17998F", "#C98A1E", "#C04630")
+    assert light["meter_cool"] != light["accent"]
+    assert light["meter_warm"] != light["warn"]
+    assert (dark["meter_cool"], dark["meter_warm"], dark["meter_hot"]) == (
+        "#5AD1C8", "#E4A33C", "#E4644E")
+
+
+def test_every_object_name_the_sheet_styles_is_one_something_sets():
+    """`QLabel#over` and `QLabel#banner` were both written against object
+    names nothing assigned, twice. A rule keyed on a name no widget
+    carries is dead code that reads as a working style.
+
+    The scan is textual on purpose: it needs no Qt, so it runs on a
+    machine without PySide6 alongside the rest of this file.
+    """
+    from pathlib import Path
+
+    gui = Path(__file__).resolve().parent.parent / "loop" / "gui"
+    assigned = set()
+    for path in gui.rglob("*.py"):
+        # Every bare-identifier string literal, not just the argument of a
+        # literal `setObjectName("x")`: half these names reach the call
+        # through a variant table (`TOOLBAR_VARIANTS`, `ENTRY_STYLES`) or a
+        # conditional. The looser scan still fails on a name that appears
+        # nowhere in `gui/` at all, which is exactly the bug it guards.
+        assigned.update(re.findall(r"[\"']([A-Za-z_][\w]*)[\"']",
+                                   path.read_text(encoding="utf-8")))
+
+    styled = set(re.findall(r"#([A-Za-z_][\w]*)\s*(?=[,\s{:])", theme.stylesheet("dark")))
+    styled -= set(re.findall(r"#[0-9A-Fa-f]{6}\b", theme.stylesheet("dark")))
+    assert styled <= assigned, f"styled but never set: {sorted(styled - assigned)}"
 
 
 def test_the_overlay_scale_uppercases_nothing():
