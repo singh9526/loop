@@ -21,7 +21,7 @@ import math
 import time
 
 from PySide6.QtCore import QEventLoop, Qt, QTimer, Signal
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QCursor, QGuiApplication
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget,
 )
@@ -78,6 +78,10 @@ class CheckinWindow(QWidget):
     def choice_buttons(self) -> list[QPushButton]:
         return self._choice_buttons
 
+    def stage_rect(self):
+        """Where the content is laid out, in window coordinates."""
+        return self._stage.geometry()
+
     def countdown_text(self, at: float) -> str:
         return format_countdown(self._remaining(at))
 
@@ -88,6 +92,11 @@ class CheckinWindow(QWidget):
             return  # already settled; a late keystroke changes nothing
         if self._session.press_key(key):
             self._render_stage()
+        # Unconditional: the buttons are checkable, so a click toggles one
+        # before `clicked` is even emitted. A key the session refused —
+        # re-pressing the choice already in force is the common one — must
+        # not leave that stray toggle on screen.
+        self._sync_choices()
 
     def visible_pick_list(self) -> list[str] | None:
         return self._session.visible_pick_list()
@@ -225,7 +234,10 @@ class CheckinWindow(QWidget):
     # --- internals ---
 
     def _build(self) -> None:
-        layout = QVBoxLayout(self)
+        # The window covers every display; `_stage` is the one display the
+        # question is drawn on. See `_place_stage`.
+        self._stage = QWidget(self)
+        layout = QVBoxLayout(self._stage)
         layout.setContentsMargins(72, 56, 72, 40)
         layout.setSpacing(12)
         layout.addStretch(1)
@@ -252,6 +264,7 @@ class CheckinWindow(QWidget):
         layout.addWidget(self._question)
 
         self._choice_buttons: list[QPushButton] = []
+        self._choice_keys: list[str] = []
         choices = QHBoxLayout()
         for choice in self._prompt.choices:
             # The keystroke is drawn beside the button, not folded into its
@@ -261,6 +274,12 @@ class CheckinWindow(QWidget):
             hint.setObjectName("overlay_caption")
             button = QPushButton(choice.label)
             button.setObjectName("overlay_choice")
+            # Checkable so the chosen one reads as chosen. A choice that
+            # opens a pick list or a set of fields leaves this row on
+            # screen and still live — you can change your mind right up
+            # until the answer is submitted — and without a marked button
+            # there is nothing to say which one you are answering under.
+            button.setCheckable(True)
             # The window owns the keyboard; a focusable button would eat
             # space and return before `keyPressEvent` ever saw them.
             button.setFocusPolicy(Qt.NoFocus)
@@ -270,6 +289,7 @@ class CheckinWindow(QWidget):
             choices.addWidget(hint)
             choices.addWidget(button)
             self._choice_buttons.append(button)
+            self._choice_keys.append(choice.key)
         choices.addStretch(1)
         layout.addLayout(choices)
 
@@ -294,9 +314,17 @@ class CheckinWindow(QWidget):
         layout.addWidget(self._countdown)
 
     def _render_stage(self) -> None:
+        """Each area is hidden, refilled, then shown — never filled while
+        visible. A child added to a widget already on screen is shown at
+        its default 640x480 before the layout has placed it, and paints
+        there once; the areas draw no background of their own, so nothing
+        erases what it left behind. That is a stale accent-coloured slab
+        under the fields, and it survives until something else forces a
+        full repaint of the region.
+        """
         self._show_missing([])
         picks = self._session.visible_pick_list()
-        self._pick_area.setVisible(picks is not None)
+        self._pick_area.setVisible(False)
         _clear(self._pick_layout)
         if picks is not None:
             lead = QLabel(PICK_LEAD)
@@ -310,9 +338,10 @@ class CheckinWindow(QWidget):
                     lambda _checked=False, key=str(index): self.press(key)
                 )
                 self._pick_layout.addWidget(button)
+            self._pick_area.setVisible(True)
 
         fields = self._session.pending_fields()
-        self._field_area.setVisible(bool(fields))
+        self._field_area.setVisible(False)
         _clear(self._field_layout)
         self._field_inputs = {}
         if fields:
@@ -327,17 +356,31 @@ class CheckinWindow(QWidget):
                 self._field_inputs[field.name] = edit
             submit = QPushButton(SUBMIT_LABEL)
             submit.setObjectName("overlay_submit")
+            # `NoFocus` for the same reason as the choice buttons, plus
+            # one of its own: a submit that took focus would pull the
+            # caret out of the field it just rejected as blank, so the
+            # obvious next move — type the answer — would go nowhere.
+            submit.setFocusPolicy(Qt.NoFocus)
             submit.clicked.connect(self._submit_from_inputs)
             self._field_layout.addWidget(submit)
+            self._field_area.setVisible(True)
             next(iter(self._field_inputs.values())).setFocus()
 
         if self._session.is_complete():
             self._finish()
 
+    def _sync_choices(self) -> None:
+        """Check the button the session is actually holding, and only it."""
+        chosen = self._session.choice
+        for button, key in zip(self._choice_buttons, self._choice_keys):
+            button.setChecked(key == chosen)
+
     def _submit_from_inputs(self) -> None:
-        self.submit_fields({
+        missing = self.submit_fields({
             name: edit.text() for name, edit in self._field_inputs.items()
         })
+        if missing:
+            self._field_inputs[missing[0]].setFocus()
 
     def _show_missing(self, missing: list[str]) -> None:
         """Every attempt re-states the whole set, so a field flagged on the
@@ -406,6 +449,43 @@ class CheckinWindow(QWidget):
                         else geometry.united(screen.geometry()))
         if geometry is not None:
             self.setGeometry(geometry)
+        self._place_stage()
+
+    def _place_stage(self) -> None:
+        """Confine the content to a single display.
+
+        The window spans the union of every screen, and laying the content
+        out across that union centres it in a rectangle no display
+        actually shows: a 1512x982 laptop beside a 3360x1890 monitor makes
+        a union 1890 tall, so the vertically centred choice row lands
+        ~945px down — off the bottom of the laptop panel, behind the Dock,
+        which is a higher window level and takes every click that reaches
+        it. The buttons were on screen and unpressable.
+
+        The rest of the window stays as it was: ground, in the same ink,
+        so every display still goes dark.
+        """
+        stage = getattr(self, "_stage", None)
+        if stage is None:
+            return  # a resize during construction, before `_build` ran
+        rect = self.rect()
+        screen = _content_screen()
+        if screen is not None:
+            local = screen.geometry().translated(-self.x(), -self.y())
+            if local.intersects(rect):
+                rect = local.intersected(rect)
+        stage.setGeometry(rect)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._place_stage()
+
+    def moveEvent(self, event) -> None:
+        # Which screen the window starts on decides where the stage goes,
+        # and `setGeometry` on a window already sized to the union moves
+        # it without resizing it.
+        super().moveEvent(event)
+        self._place_stage()
 
 
 class QtBlocker:
@@ -419,9 +499,32 @@ class QtBlocker:
         return CheckinWindow(prompt, self._mode).ask()
 
 
+def _content_screen():
+    """The screen the user is on: the one under the pointer, else primary.
+
+    An interruption belongs where the work is. The pointer is the only
+    signal Qt offers for that — the window is not up yet, so there is no
+    active window to ask — and it is right whenever the user has touched
+    the machine recently, which is the case a check-in interrupts.
+    """
+    return QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+
+
 def _clear(layout) -> None:
+    """Empty a layout now, not whenever the deferred deletes get to run.
+
+    `takeAt` only drops the layout's claim on a widget: it keeps its
+    parent, keeps its geometry, and keeps painting there. `deleteLater`
+    alone would leave the outgoing stage — the fields of the choice the
+    user just changed their mind about — drawn underneath the incoming
+    one until the event loop unwinds. Unparenting is what takes it off
+    the screen; the deferred delete then frees it safely, since this can
+    run from inside one of these widgets' own signal handlers.
+    """
     while layout.count():
         item = layout.takeAt(0)
         widget = item.widget()
         if widget is not None:
+            widget.hide()
+            widget.setParent(None)
             widget.deleteLater()

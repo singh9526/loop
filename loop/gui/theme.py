@@ -286,6 +286,15 @@ QLabel#overlay_warning { font-size: 18px; }
 QLabel#overlay_missing { color: %(crit)s; font-size: 18px; }
 QLabel#overlay_countdown { color: %(muted)s; font-family: %(mono)s; font-size: 16px; }
 QPushButton#overlay_choice { font-size: 22px; padding: 8px 16px; }
+/* The choice in force while its pick list or its fields are on screen.
+   The row stays live — a choice is not committed until the answer is —
+   so this is the only thing saying which question the fields belong to. */
+/* Fill and border only. A heavier weight here would widen the label past
+   the size hint Qt cached while the button was unchecked — a pseudo-state
+   change does not re-ask for one — and clip it inside its own button. */
+QPushButton#overlay_choice:checked {
+    background: %(accent)s; border-color: %(accent)s; color: %(ink)s;
+}
 QPushButton#overlay_pick { font-size: 20px; padding: 8px 16px; }
 QPushButton#overlay_submit {
     background: %(accent)s; color: %(panel)s; border-color: %(accent)s;

@@ -9,8 +9,8 @@ from loop.gui.dialogs.base import Field, FormDialog
 class ActionDialog(FormDialog):
     def __init__(self, parent) -> None:
         super().__init__(parent, "Log an action", [
-            Field("action", "what did you do?"),
-            Field("because", "what do you believe this will show?"),
+            Field("action", "what are you trying?"),
+            Field("because", "why do you believe this should be tried?"),
         ])
 
 

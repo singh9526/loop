@@ -1,3 +1,5 @@
+import dataclasses
+
 import pytest
 
 from loop.blockers.base import Choice, Prompt, TextField
@@ -84,6 +86,57 @@ def test_a_choice_with_fields_moves_to_the_field_stage():
     assert session.submit_fields({"new_stop_condition": "comes up once"}) == []
     assert session.is_complete()
     assert session.answers(answered_at=5.0).fields == {"new_stop_condition": "comes up once"}
+
+
+def test_a_different_choice_at_the_field_stage_re_opens_the_question():
+    """The choices stay on screen while the fields are up, so they have to
+    stay live: a click that does nothing reads as a frozen window."""
+    session = PromptSession(checkpoint_prompt(), shown_at=0.0)
+    session.press_key("c")
+    assert session.press_key("e") is True
+    assert session.stage == "fields"
+    assert [f.name for f in session.pending_fields()] == ["new_budget", "learned"]
+
+    assert session.press_key("y") is True
+    assert session.is_complete()
+    assert session.answers(answered_at=1.0).choice == "y"
+
+
+def test_a_different_choice_at_the_pick_stage_re_opens_the_question():
+    session = PromptSession(ping_prompt(), shown_at=0.0)
+    session.press_key("y")
+    assert session.stage == "pick"
+    assert session.press_key("n") is True
+    assert session.is_complete()
+    answers = session.answers(answered_at=1.0)
+    assert (answers.choice, answers.picked) == ("n", None)
+
+
+def test_re_choosing_drops_a_pick_made_under_the_old_choice():
+    """A pick indexes into the list the *choice* revealed, so it cannot
+    outlive the choice that revealed it."""
+    prompt = dataclasses.replace(
+        ping_prompt(),
+        fields_after={"y": [TextField("note", "note")]},
+    )
+    session = PromptSession(prompt, shown_at=0.0)
+    session.press_key("y")
+    session.press_key("2")
+    assert (session.stage, session.picked) == ("fields", 2)
+
+    assert session.press_key("n") is True
+    assert session.picked is None
+    assert session.answers(answered_at=1.0).picked is None
+
+
+def test_re_pressing_the_choice_in_force_changes_nothing():
+    """Otherwise it would wipe the pick — or the typed fields — underneath
+    a user who pressed it twice."""
+    session = PromptSession(ping_prompt(), shown_at=0.0)
+    session.press_key("y")
+    assert session.press_key("y") is False
+    assert session.stage == "pick"
+    assert session.choice == "y"
 
 
 def test_missing_required_fields_are_reported_and_do_not_complete():

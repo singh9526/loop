@@ -17,8 +17,8 @@ import dataclasses
 import time
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QKeyEvent
-from PySide6.QtWidgets import QFrame, QLabel, QPushButton
+from PySide6.QtGui import QFont, QGuiApplication, QKeyEvent
+from PySide6.QtWidgets import QFrame, QLabel, QLineEdit, QPushButton
 
 from loop.blockers.base import Choice, Prompt, TextField
 from loop.gui.checkin import CheckinWindow, QtBlocker
@@ -143,6 +143,52 @@ def test_the_overlay_renders_at_display_sizes(qapp):
     assert view.choice_buttons()[0].font().pixelSize() == 22
 
 
+def spanning(view, qapp):
+    """Show the window at twice the size of the screen it starts on.
+
+    That is what `_cover_all_screens` produces on a real multi-display
+    desk, and the offscreen platform reports exactly one screen — so the
+    only way to reproduce the union here is to ask for it. Shown, because
+    a hidden top-level widget is not resized until it is.
+    """
+    screen = QGuiApplication.primaryScreen().geometry()
+    view.setGeometry(screen.x(), screen.y(),
+                     screen.width() * 2, screen.height() * 2)
+    view.show()
+    qapp.processEvents()
+    return screen
+
+
+def test_the_content_is_confined_to_one_screen(qapp):
+    view = window(ping_prompt())
+    screen = spanning(view, qapp)
+    try:
+        assert view.stage_rect().size() == screen.size()
+    finally:
+        view.hide()
+
+
+def test_every_choice_is_drawn_where_a_screen_can_show_it(qapp):
+    """The window covers every display; the content must not be laid out
+    across the union of them.
+
+    With a 1512x982 laptop beside a 3360x1890 monitor the union is 1890
+    tall, so a vertically centred choice row lands ~945px down — off the
+    bottom of the laptop panel and underneath the Dock, which is a higher
+    window level and takes every click landing on it. That is the shape
+    of the bug this guards: the buttons were on screen, drew their hover
+    state, and could not be pressed.
+    """
+    view = window(p75_prompt())
+    screen = spanning(view, qapp)
+    try:
+        for button in view.choice_buttons():
+            centre = button.mapToGlobal(button.rect().center())
+            assert screen.contains(centre), f"{button.text()!r} at {centre}"
+    finally:
+        view.hide()
+
+
 def test_answering_no_completes_immediately(qapp):
     view = window(ping_prompt())
     view.press("n")
@@ -177,6 +223,91 @@ def test_choosing_extend_reveals_its_fields_in_place(qapp):
     view.press("e")
     assert [field.name for field in view.pending_fields()] == ["new_budget", "learned"]
     assert not view.is_complete()
+
+
+def test_the_choice_row_stays_live_once_a_choice_has_fields_on_screen(qapp):
+    """The reported bug: `cut scope` opened its field and every button in
+    the row — including `extend estimate` and `yes` — went silently dead,
+    with nothing on screen to say the window was still working."""
+    view = window(p75_prompt())
+    button = {b.text(): b for b in view.choice_buttons()}
+
+    button["cut scope"].click()
+    assert [f.name for f in view.pending_fields()] == ["new_stop_condition"]
+
+    button["extend estimate"].click()
+    assert [f.name for f in view.pending_fields()] == ["new_budget", "learned"]
+    assert sorted(view._field_inputs) == ["learned", "new_budget"]
+
+    button["yes"].click()
+    assert view.is_complete()
+    assert view.answers().choice == "y"
+
+
+def test_re_rendering_takes_the_outgoing_stage_off_the_screen(qapp):
+    """`takeAt` only drops the layout's claim on a widget. One left
+    parented keeps painting at its old geometry until the deferred delete
+    runs — the abandoned choice's fields drawn underneath the new ones."""
+    view = window(p75_prompt())
+    view.press("c")
+    stale = view._field_inputs["new_stop_condition"]
+
+    view.press("e")
+    assert stale.parent() is None
+    assert not stale.isVisible()
+    assert len(view._field_area.findChildren(QLineEdit)) == 2
+
+
+def test_the_pick_list_is_taken_down_when_the_choice_changes(qapp):
+    view = window(ping_prompt())
+    view.press("y")
+    stale = view._pick_area.findChildren(QPushButton)
+    assert stale
+
+    view.press("n")
+    assert view.is_complete()
+    assert not view._pick_area.isVisible()
+    assert all(button.parent() is None for button in stale)
+
+
+def test_the_chosen_button_is_the_only_one_marked(qapp):
+    view = window(p75_prompt())
+    button = {b.text(): b for b in view.choice_buttons()}
+    assert not any(b.isChecked() for b in view.choice_buttons())
+
+    button["cut scope"].click()
+    assert [b.text() for b in view.choice_buttons() if b.isChecked()] == ["cut scope"]
+
+    button["extend estimate"].click()
+    assert [b.text() for b in view.choice_buttons() if b.isChecked()] == ["extend estimate"]
+
+
+def test_re_clicking_the_choice_in_force_leaves_it_marked_and_its_fields_alone(qapp):
+    """A checkable button toggles itself on click, before `clicked` is
+    emitted. A press the session refuses must not leave that toggle behind
+    — or the chosen button reads as unchosen while its fields are up."""
+    view = window(p75_prompt())
+    button = {b.text(): b for b in view.choice_buttons()}
+    button["extend estimate"].click()
+    view._field_inputs["new_budget"].setText("2h")
+
+    button["extend estimate"].click()
+    assert button["extend estimate"].isChecked()
+    assert view._field_inputs["new_budget"].text() == "2h"
+
+
+def test_a_refused_submit_puts_the_caret_in_the_field_it_refused(qapp):
+    """Submit is `NoFocus`, so clicking it cannot pull the caret out of
+    the field the user now has to fill in."""
+    view = window(p75_prompt())
+    view.press("e")
+    view._field_inputs["new_budget"].setText("")
+    view._field_inputs["learned"].setText("pool was fine")
+    view._field_inputs["learned"].setFocus()
+
+    view._submit_from_inputs()
+    assert not view.is_complete()
+    assert view.focusWidget() is view._field_inputs["new_budget"]
 
 
 def test_blank_required_fields_are_refused_without_completing(qapp):

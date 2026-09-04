@@ -23,17 +23,31 @@ class PromptSession:
         self.fields: dict[str, str] = {}
 
     def press_key(self, key: str) -> bool:
-        """Feed a keystroke. Returns True when it advanced the session."""
-        if self.stage == CHOICE:
-            return self._press_choice(key)
-        if self.stage == PICK:
-            return self._press_pick(key)
-        return False
+        """Feed a keystroke. Returns True when it advanced the session.
+
+        A choice key stays live through the pick and field stages, not
+        only at `CHOICE`: nothing is committed until the session
+        completes, so pressing a different one re-opens the question.
+        Without that, an overlay that keeps its choice buttons on screen
+        — every one of them does — leaves them enabled and silently
+        inert the moment a choice is made, which reads as a frozen
+        window rather than as a closed question.
+        """
+        if self.stage == DONE:
+            return False
+        if self.stage == PICK and self._press_pick(key):
+            return True
+        return self._press_choice(key)
 
     def _press_choice(self, key: str) -> bool:
         if key not in {choice.key for choice in self.prompt.choices}:
             return False
+        if key == self.choice:
+            # Re-pressing the choice already in force must not throw away
+            # a pick already made or text already typed into its fields.
+            return False
         self.choice = key
+        self.picked = None
         self.stage = self._stage_after_choice(key)
         return True
 
