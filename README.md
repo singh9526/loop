@@ -7,10 +7,9 @@ timer on a debugging session, interrupts you at fixed points with a
 full-screen check-in, and asks whether you're actually making progress —
 from outside the loop you're stuck in.
 
-<video src="docs/media/demo.mp4" controls muted width="100%"></video>
+![check-in overlay firing mid-session](docs/media/demo-preview.gif)
 
-*(GitHub sometimes takes a moment to render the player above — [direct
-link to the clip](docs/media/demo.mp4) if it doesn't load.)*
+Full walkthrough (2:27, ~1 MB): [docs/media/demo.mp4](docs/media/demo.mp4)
 
 ## Why
 
